@@ -1,0 +1,22 @@
+Important Development Notes:
+Dependency Management Strategy: Consider using poetry or pipenv for better dependency management. The final structure might include:
+
+requirements/base.txt - Core dependencies
+
+requirements/dev.txt - Development tools
+
+requirements/prod.txt - Production-only
+
+requirements/ml.txt - ML-specific (Phase 2)
+
+Version Pinning: Initially use flexible version constraints. Pin exact versions before production deployment.
+
+Framework Decision: The requirements will significantly change based on whether you choose Django or FastAPI. Keep both options open during planning.
+
+Data Provider APIs: Actual packages will be added once specific providers are selected during development.
+
+ML Dependencies: These are preliminary. The actual ML stack will be determined during Phase 2 research and experimentation.
+
+Performance Considerations: Some packages (like heavy ML libraries) might be moved to separate services or containers.
+
+These files provide a solid foundation for your project while maintaining flexibility for the decisions you'll make during development. The README clearly communicates the project scope, the LICENSE provides proper attribution, and the requirements.txt shows the direction without locking you into premature decisions.

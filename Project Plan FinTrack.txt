@@ -1,0 +1,134 @@
+Project Plan: FinTrack - Economic News & Market Data Platform
+Project Overview
+A two-phase project starting with a live market tracking website, followed by ML-based price prediction capabilities.
+
+Phase 1: Market Tracking Website
+Core Features
+Real-time & Historical Market Data
+
+Stock prices (major exchanges)
+
+Commodities (gold, oil, agricultural products)
+
+ETFs and mutual funds
+
+Cryptocurrencies
+
+Forex pairs
+
+Market indices
+
+News Aggregation System
+
+Financial news from major outlets
+
+Global economic news
+
+Company-specific announcements
+
+Government policy changes
+
+Earnings reports
+
+User Features
+
+Watchlists
+
+Portfolio tracking (manual entry)
+
+Price alerts
+
+Customizable dashboards
+
+Data Visualization
+
+Interactive charts
+
+Comparison tools
+
+Historical performance graphs
+
+Heat maps
+
+Phase 2: Machine Learning Integration
+Prediction Models
+Price trend forecasting
+
+Volatility prediction
+
+Anomaly detection
+
+News sentiment analysis
+
+Correlation analysis
+
+Technical Stack Recommendation
+Backend
+Python/Django or FastAPI
+
+PostgreSQL (relational data)
+
+Redis (caching & real-time)
+
+Celery (task queue)
+
+Frontend
+React/Next.js or Vue.js
+
+Chart.js or D3.js for visualizations
+
+Tailwind CSS for styling
+
+Data Pipeline
+Apache Airflow/Prefect (orchestration)
+
+Pandas/NumPy (data processing)
+
+External APIs (Alpha Vantage, Yahoo Finance, NewsAPI, etc.)
+
+ML Stack (Phase 2)
+Scikit-learn
+
+TensorFlow/PyTorch
+
+Prophet for time series
+
+Natural Language Processing libraries
+
+Project Timeline
+Month 1-3: Foundation
+Setup infrastructure
+
+Basic data ingestion
+
+Core website structure
+
+User authentication
+
+Month 4-6: Core Features
+Complete data pipelines
+
+News aggregation
+
+Advanced visualizations
+
+User features
+
+Month 7-9: ML Preparation
+Historical data collection
+
+Feature engineering setup
+
+Model experimentation
+
+Backtesting framework
+
+Month 10-12: ML Integration
+Model deployment
+
+Prediction displays
+
+Performance monitoring
+
+Continuous improvement
+

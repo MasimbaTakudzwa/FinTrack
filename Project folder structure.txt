@@ -1,0 +1,306 @@
+fintrack-platform/
+│
+├── README.md
+├── LICENSE
+├── .gitignore
+├── requirements.txt
+├── pyproject.toml
+│
+├── backend/
+│   ├── __init__.py
+│   ├── asgi.py
+│   ├── wsgi.py
+│   ├── settings/
+│   │   ├── __init__.py
+│   │   ├── base.py
+│   │   ├── development.py
+│   │   ├── production.py
+│   │   └── testing.py
+│   │
+│   ├── apps/
+│   │   ├── core/
+│   │   │   ├── __init__.py
+│   │   │   ├── models.py
+│   │   │   ├── views.py
+│   │   │   ├── serializers.py
+│   │   │   ├── admin.py
+│   │   │   └── tests.py
+│   │   │
+│   │   ├── users/
+│   │   │   ├── __init__.py
+│   │   │   ├── models.py
+│   │   │   ├── views.py
+│   │   │   ├── serializers.py
+│   │   │   └── tests.py
+│   │   │
+│   │   ├── market_data/
+│   │   │   ├── __init__.py
+│   │   │   ├── models/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── stocks.py
+│   │   │   │   ├── commodities.py
+│   │   │   │   ├── cryptocurrencies.py
+│   │   │   │   └── indices.py
+│   │   │   ├── views.py
+│   │   │   ├── serializers.py
+│   │   │   ├── data_sources.py
+│   │   │   └── tests.py
+│   │   │
+│   │   ├── news/
+│   │   │   ├── __init__.py
+│   │   │   ├── models.py
+│   │   │   ├── views.py
+│   │   │   ├── aggregator.py
+│   │   │   ├── sentiment_analysis.py  # Phase 2
+│   │   │   └── tests.py
+│   │   │
+│   │   ├── portfolios/
+│   │   │   ├── __init__.py
+│   │   │   ├── models.py
+│   │   │   ├── views.py
+│   │   │   ├── calculations.py
+│   │   │   └── tests.py
+│   │   │
+│   │   ├── alerts/
+│   │   │   ├── __init__.py
+│   │   │   ├── models.py
+│   │   │   ├── views.py
+│   │   │   ├── notification_engine.py
+│   │   │   └── tests.py
+│   │   │
+│   │   └── ml_predictions/          # Phase 2
+│   │       ├── __init__.py
+│   │       ├── models.py
+│   │       ├── views.py
+│   │       ├── prediction_models/
+│   │       │   ├── __init__.py
+│   │       │   ├── base_model.py
+│   │       │   ├── price_predictor.py
+│   │       │   └── sentiment_model.py
+│   │       └── tests.py
+│   │
+│   ├── config/
+│   │   ├── __init__.py
+│   │   ├── celery.py
+│   │   └── cache.py
+│   │
+│   └── utils/
+│       ├── __init__.py
+│       ├── validators.py
+│       ├── helpers.py
+│       ├── decorators.py
+│       └── calculations.py
+│
+├── data_pipeline/
+│   ├── __init__.py
+│   ├── docker-compose.yml
+│   │
+│   ├── orchestrator/
+│   │   ├── dags/                    # Airflow DAGs
+│   │   │   ├── __init__.py
+│   │   │   ├── ingest_market_data.py
+│   │   │   ├── ingest_news.py
+│   │   │   └── cleanup_tasks.py
+│   │   └── plugins/
+│   │
+│   ├── ingestion/
+│   │   ├── __init__.py
+│   │   ├── market_data/
+│   │   │   ├── __init__.py
+│   │   │   ├── base_ingestor.py
+│   │   │   ├── stock_ingestor.py
+│   │   │   ├── crypto_ingestor.py
+│   │   │   └── commodity_ingestor.py
+│   │   │
+│   │   └── news/
+│   │       ├── __init__.py
+│   │       ├── news_api_client.py
+│   │       ├── rss_parser.py
+│   │       └── web_scraper.py
+│   │
+│   ├── processing/
+│   │   ├── __init__.py
+│   │   ├── data_cleaner.py
+│   │   ├── data_transformer.py
+│   │   ├── feature_engineer.py     # Phase 2
+│   │   └── data_validator.py
+│   │
+│   └── storage/
+│       ├── __init__.py
+│       ├── database_handler.py
+│       ├── cache_handler.py
+│       └── file_storage.py
+│
+├── ml_models/                      # Phase 2
+│   ├── __init__.py
+│   ├── config/
+│   │   ├── __init__.py
+│   │   ├── model_config.yaml
+│   │   └── feature_config.yaml
+│   │
+│   ├── data/
+│   │   ├── __init__.py
+│   │   ├── dataset_builder.py
+│   │   ├── feature_store.py
+│   │   └── data_loader.py
+│   │
+│   ├── training/
+│   │   ├── __init__.py
+│   │   ├── train_pipeline.py
+│   │   ├── model_factory.py
+│   │   └── hyperparameter_tuning.py
+│   │
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── lstm_model.py
+│   │   ├── prophet_model.py
+│   │   ├── xgboost_model.py
+│   │   └── ensemble_model.py
+│   │
+│   ├── evaluation/
+│   │   ├── __init__.py
+│   │   ├── backtester.py
+│   │   ├── metrics.py
+│   │   └── visualizations.py
+│   │
+│   └── deployment/
+│       ├── __init__.py
+│       ├── model_server.py
+│       ├── api_endpoints.py
+│       └── model_monitor.py
+│
+├── frontend/
+│   ├── public/
+│   │   ├── index.html
+│   │   ├── favicon.ico
+│   │   └── assets/
+│   │
+│   ├── src/
+│   │   ├── App.jsx
+│   │   ├── main.jsx
+│   │   ├── App.css
+│   │   │
+│   │   ├── api/
+│   │   │   ├── index.js
+│   │   │   ├── marketData.js
+│   │   │   ├── news.js
+│   │   │   └── predictions.js      # Phase 2
+│   │   │
+│   │   ├── components/
+│   │   │   ├── common/
+│   │   │   │   ├── Header/
+│   │   │   │   ├── Footer/
+│   │   │   │   ├── Sidebar/
+│   │   │   │   └── LoadingSpinner/
+│   │   │   │
+│   │   │   ├── market/
+│   │   │   │   ├── PriceChart/
+│   │   │   │   ├── MarketTable/
+│   │   │   │   ├── TickerTape/
+│   │   │   │   └── HeatMap/
+│   │   │   │
+│   │   │   ├── news/
+│   │   │   │   ├── NewsCard/
+│   │   │   │   ├── NewsFeed/
+│   │   │   │   └── NewsFilter/
+│   │   │   │
+│   │   │   ├── portfolio/
+│   │   │   │   ├── PortfolioSummary/
+│   │   │   │   ├── Watchlist/
+│   │   │   │   └── TransactionForm/
+│   │   │   │
+│   │   │   └── predictions/        # Phase 2
+│   │   │       ├── PredictionChart/
+│   │   │       ├── ModelMetrics/
+│   │   │       └── ForecastTable/
+│   │   │
+│   │   ├── pages/
+│   │   │   ├── Home/
+│   │   │   ├── Markets/
+│   │   │   ├── News/
+│   │   │   ├── Portfolio/
+│   │   │   ├── Alerts/
+│   │   │   ├── Predictions/        # Phase 2
+│   │   │   └── Settings/
+│   │   │
+│   │   ├── store/
+│   │   │   ├── index.js
+│   │   │   ├── marketSlice.js
+│   │   │   ├── newsSlice.js
+│   │   │   └── userSlice.js
+│   │   │
+│   │   ├── hooks/
+│   │   │   ├── useMarketData.js
+│   │   │   ├── useNews.js
+│   │   │   └── useWebSocket.js
+│   │   │
+│   │   ├── utils/
+│   │   │   ├── formatters.js
+│   │   │   ├── validators.js
+│   │   │   └── chartHelpers.js
+│   │   │
+│   │   └── styles/
+│   │       ├── tailwind.config.js
+│   │       ├── base.css
+│   │       └── components.css
+│   │
+│   ├── package.json
+│   └── vite.config.js              # or webpack.config.js
+│
+├── infrastructure/
+│   ├── docker/
+│   │   ├── Dockerfile.backend
+│   │   ├── Dockerfile.frontend
+│   │   ├── Dockerfile.ml           # Phase 2
+│   │   └── docker-compose.yml
+│   │
+│   ├── kubernetes/                 # Optional
+│   │   ├── deployment.yaml
+│   │   ├── service.yaml
+│   │   └── ingress.yaml
+│   │
+│   ├── nginx/
+│   │   └── nginx.conf
+│   │
+│   └── terraform/                  # Optional
+│       ├── main.tf
+│       ├── variables.tf
+│       └── outputs.tf
+│
+├── tests/
+│   ├── __init__.py
+│   ├── conftest.py
+│   ├── unit/
+│   ├── integration/
+│   └── e2e/
+│
+├── docs/
+│   ├── architecture/
+│   │   ├── system_design.md
+│   │   ├── data_flow.md
+│   │   └── api_documentation.md
+│   │
+│   ├── development/
+│   │   ├── setup_guide.md
+│   │   ├── coding_standards.md
+│   │   └── deployment_guide.md
+│   │
+│   └── ml_documentation/           # Phase 2
+│       ├── model_specs.md
+│       ├── training_procedure.md
+│       └── evaluation_metrics.md
+│
+├── scripts/
+│   ├── setup.sh
+│   ├── deploy.sh
+│   ├── backup.sh
+│   └── monitoring/
+│
+└── config/
+    ├── environment/
+    │   ├── .env.example
+    │   ├── .env.development
+    │   └── .env.production
+    │
+    ├── logging.yaml
+    └── feature_flags.yaml
