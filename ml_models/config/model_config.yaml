@@ -1,0 +1,114 @@
+# ML Model Configuration
+models:
+  price_prediction:
+    xgboost:
+      default_params:
+        n_estimators: 100
+        max_depth: 5
+        learning_rate: 0.1
+        subsample: 0.8
+        colsample_bytree: 0.8
+        random_state: 42
+      hyperparameter_grid:
+        max_depth: [3, 5, 7]
+        learning_rate: [0.01, 0.05, 0.1]
+        n_estimators: [50, 100, 200]
+        subsample: [0.7, 0.8, 0.9]
+      retraining_schedule: "weekly"
+    
+    lstm:
+      sequence_length: 30
+      batch_size: 32
+      epochs: 50
+      validation_split: 0.2
+      layers:
+        - type: "lstm"
+          units: 50
+          return_sequences: true
+          dropout: 0.2
+        - type: "lstm"
+          units: 50
+          return_sequences: false
+          dropout: 0.2
+        - type: "dense"
+          units: 25
+        - type: "dense"
+          units: 1
+  
+  sentiment_analysis:
+    finbert:
+      model_name: "ProsusAI/finbert"
+      max_length: 512
+      truncation: true
+    
+    vader:
+      lexicon_path: "nltk_data/sentiment/vader_lexicon"
+    
+    ensemble:
+      weights:
+        finbert: 0.6
+        vader: 0.4
+
+features:
+  technical_indicators:
+    enabled: true
+    indicators:
+      - sma_7
+      - sma_30
+      - ema_12
+      - rsi
+      - macd
+      - volatility
+  
+  time_features:
+    enabled: true
+    features:
+      - hour
+      - day_of_week
+      - month
+      - is_weekend
+  
+  lag_features:
+    enabled: true
+    columns: ["close", "volume", "returns"]
+    lags: [1, 2, 3, 5, 10]
+  
+  rolling_features:
+    enabled: true
+    columns: ["close", "volume"]
+    windows: [5, 10, 20]
+
+training:
+  cross_validation:
+    method: "timeseries"
+    n_splits: 5
+    test_size: 0.2
+  
+  metrics:
+    regression: ["mse", "mae", "r2", "mape"]
+    classification: ["accuracy", "precision", "recall", "f1"]
+  
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.001
+
+deployment:
+  model_server:
+    type: "fastapi"
+    port: 8001
+    workers: 4
+  
+  caching:
+    enabled: true
+    ttl: 300  # seconds
+  
+  monitoring:
+    enabled: true
+    metrics:
+      - prediction_latency
+      - model_accuracy
+      - feature_distribution
+    alert_thresholds:
+      accuracy_drop: 0.1
+      latency_increase: 2.0
