@@ -1,133 +1,36 @@
-# ============================================
-# FinTrack Platform - Development Dependencies
-# ============================================
-#
-# Note: This is a preliminary requirements file.
-# Specific versions and additional packages will be
-# determined during active development based on:
-# 1. Chosen backend framework (Django vs FastAPI)
-# 2. Data provider APIs selected
-# 3. ML library preferences for Phase 2
-# 4. Performance requirements discovered
-#
-# ============================================
+# requirements-ml.txt
+# Additional ML packages beyond minimal
 
-# -------------------------
-# Core Python & Backend
-# -------------------------
-# Backend Framework (TBD during development)
-# django>=4.0,<5.0  # OR
-# fastapi>=0.95.0
-# uvicorn[standard]>=0.21.0  # If using FastAPI
+# Core ML
+xgboost==1.7.6
+lightgbm==4.0.0
+catboost==1.2.2
 
-# Database & ORM
-psycopg2-binary>=2.9.5  # PostgreSQL adapter
-# sqlalchemy>=2.0.0  # If not using Django ORM
+# Time Series
+prophet==1.1.4
+statsmodels==0.14.0
+ta==0.10.2
 
-# Async & Task Queue
-redis>=4.5.0
-celery>=5.2.0  # For async tasks
-flower>=1.0.0  # Celery monitoring
+# Deep Learning
+torch==2.0.1
+tensorflow==2.13.0
+keras==2.13.1
 
-# API & Web
-requests>=2.28.0  # HTTP client
-aiohttp>=3.8.0  # Async HTTP client
-beautifulsoup4>=4.11.0  # Web scraping
-lxml>=4.9.0  # XML parsing
-
-# -------------------------
-# Data Processing
-# -------------------------
-numpy>=1.24.0
-pandas>=1.5.0
-pandas-ta>=0.3.0  # Technical indicators
-
-# -------------------------
-# Development & Testing
-# -------------------------
-black>=23.0.0  # Code formatting
-flake8>=6.0.0  # Linting
-mypy>=1.0.0  # Type checking
-pytest>=7.0.0  # Testing framework
-pytest-django>=4.5.0  # If using Django
-pytest-asyncio>=0.20.0  # Async tests
-pytest-cov>=4.0.0  # Test coverage
-factory-boy>=3.2.0  # Test data factories
-
-# Development Tools
-python-dotenv>=1.0.0  # Environment variables
-ipython>=8.10.0  # Interactive Python
-jupyter>=1.0.0  # Notebooks for data analysis
-
-# -------------------------
-# Data Pipeline (Phase 1)
-# -------------------------
-# Airflow/Prefect dependencies will be added based on chosen orchestrator
-# apache-airflow>=2.5.0  # OR
-# prefect>=2.0.0
-
-# Data Quality & Validation
-great-expectations>=0.16.0  # Data validation
-pydantic>=2.0.0  # Data validation
-
-# -------------------------
-# Machine Learning (Phase 2)
-# -------------------------
-# ML Core Libraries
-scikit-learn>=1.2.0
-# tensorflow>=2.12.0  # OR
-# torch>=2.0.0
-
-# Time Series Analysis
-prophet>=1.1.0  # Facebook Prophet
-statsmodels>=0.14.0  # Statistical models
-arch>=6.0.0  # Financial time series
+# NLP
+transformers==4.31.0
+nltk==3.8.1
+vaderSentiment==3.3.2
+spacy==3.6.1
+sentence-transformers==2.2.2
 
 # Feature Engineering
-feature-engine>=1.6.0  # Feature creation
+ta-lib==0.4.26  # Note: May need system installation first
 
-# ML Operations
-mlflow>=2.0.0  # Experiment tracking
-# Optional: Weights & Biases, DVC
+# Experiment Tracking
+wandb==0.15.8
+mlflow==2.5.0
 
-# -------------------------
-# API Clients for Data Sources
-# -------------------------
-# To be added based on selected providers:
-# alpha_vantage>=2.3.0
-# yfinance>=0.2.0
-# polygon-api-client>=1.0.0
-# coingecko-api>=1.2.0
-# newsapi-python>=0.2.0
-
-# -------------------------
-# Monitoring & Logging
-# -------------------------
-sentry-sdk>=1.25.0  # Error tracking
-structlog>=23.0.0  # Structured logging
-prometheus-client>=0.16.0  # Metrics
-
-# -------------------------
-# Deployment & Infrastructure
-# -------------------------
-gunicorn>=20.0.0  # WSGI server
-uvicorn[standard]>=0.21.0  # ASGI server
-# docker>=6.0.0  # Docker SDK
-
-# ============================================
-# Notes for Development:
-# ============================================
-# 1. Version constraints will be refined during development
-# 2. Some packages may be mutually exclusive (Django vs FastAPI)
-# 3. ML packages will be separated into requirements-ml.txt for Phase 2
-# 4. Production dependencies will be separated from development
-# 5. Consider using poetry or pip-tools for better dependency management
-#
-# To install:
-# pip install -r requirements.txt
-#
-# For development:
-# pip install -r requirements-dev.txt  # Will be created
-#
-# For production:
-# pip install -r requirements-prod.txt  # Will be created
+# Model Serving
+fastapi==0.100.1
+uvicorn[standard]==0.23.2
+onnxruntime==1.15.1

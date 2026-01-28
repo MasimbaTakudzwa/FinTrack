@@ -1,0 +1,62 @@
+# infrastructure/docker/docker-compose.ml.yml
+version: '3.8'
+
+services:
+  ml-model-server:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.ml
+    ports:
+      - "8001:8001"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - REDIS_HOST=redis
+      - POSTGRES_HOST=postgres
+    depends_on:
+      - mlflow
+      - redis
+    volumes:
+      - model_cache:/app/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+    volumes:
+      - mlflow_artifacts:/mlflow
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://user:pass@postgres/mlflow
+      --default-artifact-root s3://mlflow/
+      --host 0.0.0.0
+
+  model-training:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.ml
+    command: python ml_models/training/train_all.py
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - training_data:/app/data
+      - trained_models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  model_cache:
+  mlflow_artifacts:
+  training_data:
+  trained_models:
