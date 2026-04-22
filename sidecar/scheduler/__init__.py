@@ -99,6 +99,16 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
             scheduler.remove_job("ingest_news")
 
     if config.get("fred_api_key"):
+        # Fire-on-first-add semantics: when `ingest_macro` is being added for
+        # the first time (no prior job in the jobstore), kick off a backfill
+        # immediately so a user who just pasted their FRED key sees data
+        # without waiting up to 24h for the cron. On subsequent registrations
+        # — sidecar restart with the job already persisted, or a reconfigure
+        # that only changes the cron hour — we skip `next_run_time` so the
+        # existing schedule is honoured.
+        macro_kwargs: dict[str, Any] = {}
+        if scheduler.get_job("ingest_macro") is None:
+            macro_kwargs["next_run_time"] = now
         scheduler.add_job(
             ingest_macro,
             trigger=CronTrigger(
@@ -107,6 +117,7 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
             id="ingest_macro",
             name="Ingest macro observations from FRED",
             replace_existing=True,
+            **macro_kwargs,
         )
     else:
         with contextlib.suppress(JobLookupError):

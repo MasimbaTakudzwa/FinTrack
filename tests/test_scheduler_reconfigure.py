@@ -126,6 +126,60 @@ def test_register_jobs_adds_macro_only_when_fred_key_set(
     assert any(f.name == "hour" and "9" in str(f) for f in job.trigger.fields)
 
 
+def test_register_jobs_fires_macro_immediately_on_first_add_with_fred_key(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    """When ``ingest_macro`` is added for the first time and the user has a
+    FRED key, fire immediately so backfill runs within seconds instead of
+    waiting up to 24 hours for the cron's natural first fire.
+    """
+    before = datetime.now(UTC)
+    _register_jobs(
+        paused_scheduler,
+        dict(DEFAULT_CONFIG, **{"fred_api_key": "a-key"}),
+    )
+    after = datetime.now(UTC)
+
+    job = paused_scheduler.get_job("ingest_macro")
+    assert job is not None and job.next_run_time is not None
+    window = (before - timedelta(seconds=1), after + timedelta(seconds=1))
+    assert window[0] <= job.next_run_time <= window[1], (
+        "ingest_macro next_run_time should be ~now on first-add with FRED key"
+    )
+
+
+def test_register_jobs_does_not_refire_macro_on_reconfigure(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    """Subsequent registrations (sidecar restart, cron hour change) must not
+    reset ``next_run_time`` to now — let the cron's natural schedule win so
+    the daily backfill happens at the configured UTC hour, not on every
+    scheduler start.
+    """
+    # First register: seeds the job. Fire-on-first-add means next_run_time=now.
+    _register_jobs(
+        paused_scheduler,
+        dict(DEFAULT_CONFIG, **{"fred_api_key": "a-key"}),
+    )
+    assert paused_scheduler.get_job("ingest_macro") is not None
+
+    # Second register: job already exists, so we skip next_run_time. The cron
+    # trigger's natural next-fire (hour=10 UTC today or tomorrow) should win.
+    _register_jobs(
+        paused_scheduler,
+        dict(
+            DEFAULT_CONFIG,
+            **{"fred_api_key": "a-key", "ingest_macro.cron_hour_utc": 10},
+        ),
+    )
+
+    job = paused_scheduler.get_job("ingest_macro")
+    assert job is not None and job.next_run_time is not None
+    # Cron fires at hour=10, minute=0 every day; next_run_time must match.
+    assert job.next_run_time.hour == 10
+    assert job.next_run_time.minute == 0
+
+
 def test_register_jobs_removes_disabled_crypto(
     paused_scheduler: BackgroundScheduler,
 ) -> None:

@@ -135,3 +135,48 @@ def test_ingest_macro_with_no_indicators(
 
     assert jobs.ingest_macro() == 0
     assert called["n"] == 0
+
+
+def test_ingest_macro_chunks_large_backfills(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first-run FRED backfill can exceed SQLite's 32766-variable statement
+    limit — monthly CPI since 1947 plus daily DGS10 since 1962 is already
+    ~17k rows at 3 cols each = ~51k bind params. The job must chunk the bulk
+    insert so this succeeds end-to-end on real data, not only on tiny fixtures.
+    """
+    _seed_indicators()
+    monkeypatch.setattr(cfg, "fred_api_key", "fake-key")
+
+    from sidecar.scheduler import jobs
+
+    # 1200 CPI points is well past any sensible single-statement cap;
+    # paired with UNRATE points it forces multiple chunks through the loop.
+    cpi_points = [
+        MacroPoint(
+            "CPIAUCSL",
+            date(2000 + (i // 12), (i % 12) + 1, 1),
+            Decimal("100") + Decimal(i) / Decimal("10"),
+        )
+        for i in range(1200)
+    ]
+    unrate_points = [
+        MacroPoint(
+            "UNRATE",
+            date(2000 + (i // 12), (i % 12) + 1, 1),
+            Decimal("4.0"),
+        )
+        for i in range(50)
+    ]
+    monkeypatch.setattr(
+        jobs,
+        "fetch_macro_series_many",
+        lambda ids, key: cpi_points + unrate_points,
+    )
+
+    inserted = jobs.ingest_macro()
+    assert inserted == 1250
+
+    with session_scope() as s:
+        rows = s.execute(select(MacroDataPoint)).scalars().all()
+        assert len(rows) == 1250
