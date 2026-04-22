@@ -12,9 +12,9 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-22 — Session 003 (checkpoint 15 — Sprint 5 release pipeline scaffolded: CI + Release workflows + updater plugin + release docs)
-**Active sprint:** Sprint 5 — Packaging & Distribution (freeze ✅, bundle ✅, CI workflow ✅, Release workflow ✅, updater plugin ✅, release docs ✅; v0.1.0 tag pending)
-**Overall status:** 🟢 Sprints 1–4 complete. Sprint 5 nearly done: release pipeline fully wired (tag push `v*` → macOS + Windows matrix → PyInstaller freeze → Tauri build → signed installers → draft release). First unsigned v0.1.0 can be cut today; signed releases require secrets to be uploaded (Apple Developer ID, Windows cert, updater keypair — all documented).
+**Last updated:** 2026-04-22 — Session 003 (checkpoint 18 — belated Macro page UI build-out)
+**Active sprint:** Sprint 5 — Packaging & Distribution (freeze ✅, bundle ✅, CI workflow ✅, Release workflow ✅, updater plugin ✅, release docs ✅, PR #1 merged ✅, PR #2 merged ✅, v0.1.0 tagged ✅, draft release cut ✅, CI-built `.dmg` smoke-tested ✅; publish button + optional GUI smoke pass pending user decision) — plus a belated Sprint 3 follow-up: Macro page built out (was a placeholder).
+**Overall status:** 🟢 Sprints 1–4 complete. Sprint 5 effectively done — v0.1.0 draft release sitting on GitHub with three installers attached: `FinTrack_0.1.0_aarch64.dmg` (48 MB), `FinTrack_0.1.0_x64_en-US.msi` (50 MB), `FinTrack_0.1.0_x64-setup.exe` (39 MB). No updater bundles (expected — `TAURI_SIGNING_PRIVATE_KEY` not yet set). CI `.dmg` verified: mounts clean, `FinTrack.app` carries the right identifier `com.fintrack.app` + version 0.1.0, adhoc-signed (unsigned build, as expected), frozen sidecar inside bundles correctly and boots to `/api/health/` in ~3 s. The last click is publishing the draft → live.
 
 ### What was just completed (Sprint 2 first pass)
 - **PricePoint model + migration**: `sidecar/db/models.py` — `PricePoint` with FK to `assets`, `Numeric(18,6)` for o/h/l/c, `BigInteger` volume, composite index `ix_price_points_asset_ts` on `(asset_id, timestamp)`, unique constraint `uq_price_points_asset_ts` for dedup. Alembic migration `0002_create_price_points.py` — runs cleanly on top of 0001. Asset ↔ PricePoint relationship wired with `cascade="all, delete-orphan"`
@@ -161,20 +161,36 @@ User raised 8 items after confirming Sprint 4 worked live. Worked through all of
 - **Local bundle verification**: `pnpm tauri build --bundles app` with updater plugin enabled produces `FinTrack.app` + `FinTrack.app.tar.gz` (51 MB updater bundle) successfully. Signing step errors when `TAURI_SIGNING_PRIVATE_KEY` isn't set — workflow handles this via conditional `--config` override (verified locally: `pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'` produces clean `.app` with no signing errors).
 - **`docs/development/release_process.md`** (new): end-to-end release runbook. Covers: pipeline overview table (inputs, outputs, artifacts per platform), one-time updater keypair generation (`pnpm tauri signer generate -w ~/.tauri/fintrack.key`), complete GitHub Actions secrets matrix (Apple Developer ID 6 secrets, Windows PFX 2 secrets, updater key 2 secrets, with base64 encoding commands), pre-flight version sync check (tauri.conf.json + Cargo.toml + pyproject.toml), tag-and-push flow, `gh run watch`, draft-release smoke-test checklist (clean-machine install, health indicator, asset page, SQLite DB path, clean shutdown), publish step, rollback procedure (delete release / cut fixed version / instruct users to reinstall), update propagation semantics (GitHub `latest/download/<file>` redirect), troubleshooting (hidden-import failures, xattr "detritus" errors, notarisation hangs, Windows SmartScreen reputation).
 
+### What was completed (Sprint 5 close-out — first v0.1.0 cut + fix)
+- **PR #1 merged** (rebase, commits `a78377a` feat packaging + `463190d` docs): CI + Release workflows, updater plugin, release docs all on main.
+- **Local gh CLI installed** via `brew install gh` (2.91.0) + `gh auth login`. Added "Local tools you need installed" section to `docs/development/release_process.md` plus browser-URL fallbacks on every `gh` command so future releases can be driven from the GitHub web UI when the CLI isn't handy.
+- **v0.1.0 tagged** on `463190d`, pushed. Release workflow triggered (`24800322641`). **macOS build failed** at `pnpm tauri build` with `security: SecKeychainItemImport: One or more parameters passed to a function were not valid. failed to bundle project failed codesign application`. Windows build succeeded — `.msi` + `-setup.exe` uploaded. Release job never ran (matrix partial failure).
+- **Root cause identified**: the release workflow's "Build Tauri app" step exported `APPLE_CERTIFICATE` (and every other signing env var) unconditionally from `${{ secrets.APPLE_CERTIFICATE }}`, which GitHub expands to an empty string when the secret is unset. Tauri's macOS bundler treats "env var present" as "sign this build" regardless of payload, so it passed empty bytes to `security import` and died.
+- **Fix shipped on PR #2** (`c5ccde3`, `fix(ci): stop Tauri bundler attempting codesign with empty signing secrets`):
+  - Signing secrets now ride through the workflow as `_SEC_*`-prefixed env vars; the run script only re-exports them under their canonical names (`APPLE_CERTIFICATE`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`, `APPLE_CERTIFICATE_PASSWORD`, `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`, `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) when they actually contain a value. No value → Tauri takes the "no signing configured" path and produces a clean unsigned build.
+  - Release job's `files:` glob was pointing at `artifacts/fintrack-macos/**` and `artifacts/fintrack-windows/**` but the matrix uploads as `fintrack-macos-installer` / `fintrack-macos-updater` / `fintrack-windows-installer` / `fintrack-windows-updater`. Fixed to enumerate the four actual directory names — would have left the draft release empty.
+  - Added `pnpm -C shell tauri:build:unsigned` script (same `--config '{"bundle":{"createUpdaterArtifacts":false}}'` override the workflow uses) so local packaging tests don't require the updater keypair. Plain `pnpm tauri build` without the key aborts with `A public key has been found, but no private key. Make sure to set TAURI_SIGNING_PRIVATE_KEY environment variable.`
+  - Documented both failure modes + the local unsigned-build flow in `docs/development/release_process.md` troubleshooting section.
+- **v0.1.0 tag re-pointed**: deleted the old `49fa32a` annotated tag (local + remote), re-tagged as `e69ede9` on the fixed main HEAD (`c5ccde3`). Release workflow re-triggered as run `24801268652`. Watching in background for draft release + artifact verification.
+
+### What was completed (belated Sprint 3 follow-up — Macro page UI)
+User flagged during Sprint 5 close-out that `/macro` was still a placeholder — the backend (Sprint 2) had been fully done (API, seeding, FRED fetcher, scheduler job), but the frontend was never built. Closed that gap now.
+- **`shell/src/components/MacroLineChart.tsx`** (new, ~105 LOC): Sibling of `CandleChart` — same `lightweight-charts` v5 lifecycle (createChart once + cleanup on unmount, setData on points change), uses `LineSeries` because FRED observations are single-valued. Light/dark palettes match the rest of the app. `toLineData` coerces `"YYYY-MM-DD"` → `UTCTimestamp` via `Date.parse(\`${p.date}T00:00:00Z\`) / 1000` so the time-scale always treats the data as UTC midnight regardless of the user's local offset.
+- **`shell/src/pages/Macro.tsx`** (rewritten, ~360 LOC, replaces the `PagePlaceholder` stub): Two-column layout.
+  - **Left (`IndicatorList`)**: sorted-alphabetical list of FRED series as clickable buttons; active state gets indigo tint + bolder label. Each row shows series_id (monospace) + name + frequency·units caption.
+  - **Right (`SeriesPanel`)**: header card with series name + series_id/frequency/units meta + observation count + description. Below that, the chart in its own panel, then a 4-cell `StatsGrid` (Latest / Previous / vs. previous / vs. series-start date) with up/down/neutral tone colouring + ArrowUp/DownRight icons. `summarise()` computes latest/previous/earliest points + both percent-change windows, guards against divide-by-zero.
+  - **`NoDataHint`**: shown when a series has zero observations (the realistic default without a FRED API key). LineChart icon + friendly copy + indigo CTA button linking to `/settings` where the user can paste their FRED key.
+- **React 19 hook rule compliance**: both effects only call `setState` from `.then`/`.catch` handlers — never inline in the effect body. Two effects: one for the indicator list (bumps on `tick`), one for the selected series (bumps on `selected` + `tick`). Refresh button bumps `tick` to re-run both.
+- **Formatting helpers**: `fmtValue(n, units)` detects Percent units (`/percent|%/i.test(units)`) and appends `%` — so CPIAUCSL shows `"315.60"` while UNRATE shows `"3.80%"`. `fmtDate(iso)` parses `"YYYY-MM-DD"` as UTC midnight (timezone-safe). `fmtPct` handles the relative-change display with sign.
+- **Dark mode**: `useResolvedTheme()` → palette toggle in the chart; Tailwind `dark:` variants everywhere else.
+- **Verifications**: `pnpm -C shell lint` clean, `pnpm -C shell build` clean — bundle went from 557 kB / 172 kB gzipped (Sprint 4 end) to **569 kB / 175 kB gzipped** (+12 kB raw / +3 kB gzipped for MacroLineChart + Macro page). No new dependencies — uses the existing `lightweight-charts`, `lucide-react`, `react-router-dom`.
+
 ### What to work on NEXT (in order)
-1. [ ] **Live GUI smoke pass** for everything landed this session: `pnpm tauri dev`, then exercise:
-   - Dashboard "Add asset" → lookup `TSLA` / `GME` / `BTC-USD` / some obscure micro-cap → confirm bars appear within ~1 min.
-   - `/watchlists` → rename a list, set default, delete a non-default list (confirm the new dialog fires), "Track new…" from a non-default watchlist and verify the new asset lands on the current list.
-   - Market overview → confirm Top losers populates (was always empty before).
-   - `/alerts` → delete an alert via the new dialog.
-   - AssetDetail → switch between 1H/4H/1D/3D/1W/All, click two points on the chart to measure, create an alert with threshold just above current close, wait ≤1 min for the `check_price_alerts` job, confirm the header bell flashes amber + badge shows "1", open the dropdown to see the triggered alert + watch the OS notification appear.
-2. [ ] **Sprint 5 — Tag v0.1.0** (last remaining item; pipeline ✅, docs ✅):
-   - Verify versions are in sync: `shell/src-tauri/tauri.conf.json` + `shell/src-tauri/Cargo.toml` + `pyproject.toml` all at `0.1.0`.
-   - `git tag -a v0.1.0 -m "FinTrack v0.1.0" && git push origin v0.1.0` — triggers `release.yml`.
-   - Watch the run with `gh run watch`, ~8–12 min.
-   - First release ships unsigned + no-updater (secrets not yet set): installers attach to the draft release via `softprops/action-gh-release@v2`. Smoke-test the `.dmg` / `.msi` on a clean VM before promoting the draft to published.
-   - See `docs/development/release_process.md` for the complete runbook.
-   - (Later) Generate updater keypair, populate `pubkey` in `tauri.conf.json`, upload private key + Apple/Windows certs as GH secrets, cut v0.1.1 — that release will produce signed installers + updater bundles automatically.
+1. [ ] **Confirm the re-triggered release workflow produces a draft release** with all four artifacts attached (`.dmg`, `.msi`, `-setup.exe`, and any updater bundles that happen to exist). If the macOS build still fails, read the step log and iterate — next likely culprits are (a) yfinance/feedparser data-file inclusion in the PyInstaller spec on the runner's Python 3.13 vs. local 3.13, (b) xattr "resource fork" errors on the frozen sidecar (document already mentions `xattr -cr dist/fintrack-sidecar/` as the fix).
+2. [ ] **Smoke-test the draft release artifacts** on a clean Mac (install from `.dmg`, confirm health indicator goes green, confirm SQLite lands at `~/Library/Application Support/FinTrack/fintrack.db`, exercise a watchlist + an alert + add-asset, clean-quit via Cmd+Q → verify no orphan `fintrack-sidecar` process). Skip Windows smoke-test unless a Windows box is available.
+3. [ ] **Live GUI smoke pass** for Sprint 4 features against the bundled `.app` (the unbundled dev-mode works — this catches packaging-specific regressions): Dashboard "Add asset" → lookup `TSLA` / `GME` / `BTC-USD` → bars appear within ~1 min. `/watchlists` rename / set default / delete non-default (confirm dialog fires — `window.confirm` is suppressed in WKWebView). Market overview Top losers populates. `/alerts` delete via dialog. AssetDetail timeframe toggle + measurement tool + create-alert → wait ≤1 min → header bell badges + OS notification shows "FinTrack" (not "Terminal").
+4. [ ] **Promote draft to published** via `gh release edit v0.1.0 --draft=false` after smoke-test passes. Update README with installation instructions + download link.
+5. [ ] **Sign-up follow-ups** (deferred from Sprint 5, tracked for a future v0.1.1): generate updater keypair + populate `pubkey` in `tauri.conf.json` + add `TAURI_SIGNING_PRIVATE_KEY` secret. Apple Developer ID ($99/yr) + cert import → add Apple 6 secrets. Windows EV cert or Azure Trusted Signing → add Windows 2 secrets. All documented in `docs/development/release_process.md`.
 
 ### Active blockers
 - None
@@ -332,6 +348,7 @@ User raised 8 items after confirming Sprint 4 worked live. Worked through all of
 - [x] Asset detail page: full OHLCV chart (TradingView Lightweight Charts), recent news placeholder (3D — `1915c35`)
 - [x] Market overview: top movers, asset-type counts (sector heatmap deferred — no sector field on Asset) (3E — `da225d6`)
 - [x] Settings page: theme selector (client), data-source toggles, refresh intervals, FRED key, read-only runtime info; full backend w/ settings table + /api/config GET/PUT + scheduler reconfigure (3F)
+- [x] Macro page: indicator list sidebar + series detail panel with `MacroLineChart` (lightweight-charts `LineSeries`) + stats grid (latest / previous / vs-previous / vs-start) + `NoDataHint` CTA when FRED key unset (belated follow-up; shipped during Sprint 5 close-out)
 
 ---
 
@@ -386,7 +403,7 @@ User raised 8 items after confirming Sprint 4 worked live. Worked through all of
 - [x] Mac code signing + notarisation hooks (Apple Developer ID — pipeline ready, no-op when secrets unset)
 - [x] Windows signing hooks (EV cert OR Azure Trusted Signing — pipeline ready, no-op when secrets unset)
 - [x] Tauri updater plugin configured (GitHub Releases as update feed; pubkey placeholder; conditional `createUpdaterArtifacts` in CI)
-- [ ] First release: v0.1.0 tagged, `.dmg` + `.msi` published to GitHub Releases
+- [x] First release: v0.1.0 tagged, `.dmg` + `.msi` + `-setup.exe` attached to draft GitHub Release (one click from publish)
 - [x] `docs/development/release_process.md`
 
 ---
