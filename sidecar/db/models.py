@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -71,4 +72,42 @@ class PricePoint(Base):
     __table_args__ = (
         UniqueConstraint("asset_id", "timestamp", name="uq_price_points_asset_ts"),
         Index("ix_price_points_asset_ts", "asset_id", "timestamp"),
+    )
+
+
+class MacroIndicator(Base):
+    __tablename__ = "macro_indicators"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    series_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    units: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    frequency: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+
+    data_points: Mapped[list[MacroDataPoint]] = relationship(
+        back_populates="indicator", cascade="all, delete-orphan"
+    )
+
+
+class MacroDataPoint(Base):
+    __tablename__ = "macro_data_points"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    indicator_id: Mapped[int] = mapped_column(
+        ForeignKey("macro_indicators.id", ondelete="CASCADE"), index=True
+    )
+    date: Mapped[date] = mapped_column(Date)
+    value: Mapped[Decimal] = mapped_column(Numeric(20, 6))
+
+    indicator: Mapped[MacroIndicator] = relationship(back_populates="data_points")
+
+    __table_args__ = (
+        UniqueConstraint("indicator_id", "date", name="uq_macro_data_points_ind_date"),
+        Index("ix_macro_data_points_ind_date", "indicator_id", "date"),
     )

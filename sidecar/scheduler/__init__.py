@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 from threading import Lock
 
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from sidecar.config import settings
-from sidecar.scheduler.jobs import ingest_prices
+from sidecar.scheduler.jobs import ingest_crypto, ingest_macro, ingest_prices
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,29 @@ def _register_jobs(scheduler: BackgroundScheduler) -> None:
         name="Ingest OHLCV prices from yfinance",
         replace_existing=True,
     )
+    if settings.enable_crypto_job:
+        scheduler.add_job(
+            ingest_crypto,
+            trigger=IntervalTrigger(minutes=settings.ingest_crypto_interval_minutes),
+            id="ingest_crypto",
+            name="Ingest OHLC crypto prices from CoinGecko",
+            replace_existing=True,
+        )
+    else:
+        with contextlib.suppress(Exception):
+            scheduler.remove_job("ingest_crypto")
+
+    if settings.fred_api_key:
+        scheduler.add_job(
+            ingest_macro,
+            trigger=CronTrigger(hour=settings.ingest_macro_cron_hour, minute=0),
+            id="ingest_macro",
+            name="Ingest macro observations from FRED",
+            replace_existing=True,
+        )
+    else:
+        with contextlib.suppress(Exception):
+            scheduler.remove_job("ingest_macro")
 
 
 def start() -> BackgroundScheduler | None:

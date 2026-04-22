@@ -14,10 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from sidecar import __version__, scheduler
 from sidecar.api.assets import router as assets_router
 from sidecar.api.health import router as health_router
+from sidecar.api.macro import router as macro_router
 from sidecar.api.prices import router as prices_router
 from sidecar.config import settings
 from sidecar.db.migrations_runner import upgrade_to_head
-from sidecar.db.seed import seed_default_assets
+from sidecar.db.seed import seed_all_defaults
 
 PARENT_WATCHDOG_INTERVAL_SECONDS = 2.0
 
@@ -39,11 +40,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     if settings.enable_seed:
         try:
-            created = seed_default_assets()
-            if created:
-                logger.info("Seeded %d default assets", created)
+            assets_created, indicators_created = seed_all_defaults()
+            if assets_created or indicators_created:
+                logger.info(
+                    "Seeded %d assets and %d macro indicators",
+                    assets_created,
+                    indicators_created,
+                )
         except Exception:
-            logger.exception("Seeding default assets failed (continuing)")
+            logger.exception("Seeding defaults failed (continuing)")
 
     if settings.enable_scheduler:
         try:
@@ -69,6 +74,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(assets_router)
 app.include_router(prices_router)
+app.include_router(macro_router)
 
 
 def _watch_parent(initial_ppid: int) -> None:

@@ -24,7 +24,10 @@ class Settings(BaseSettings):
     fred_api_key: str | None = None
     enable_scheduler: bool = True
     enable_seed: bool = True
+    enable_crypto_job: bool = False
     ingest_prices_interval_minutes: int = 5
+    ingest_crypto_interval_minutes: int = 15
+    ingest_macro_cron_hour: int = 6
 
     def resolved_db_path(self) -> str:
         return self.db_path or _default_db_path()
