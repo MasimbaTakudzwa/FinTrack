@@ -12,8 +12,8 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-22 — Session 003 (checkpoint 18 — belated Macro page UI build-out)
-**Active sprint:** Sprint 5 — Packaging & Distribution (freeze ✅, bundle ✅, CI workflow ✅, Release workflow ✅, updater plugin ✅, release docs ✅, PR #1 merged ✅, PR #2 merged ✅, v0.1.0 tagged ✅, draft release cut ✅, CI-built `.dmg` smoke-tested ✅; publish button + optional GUI smoke pass pending user decision) — plus a belated Sprint 3 follow-up: Macro page built out (was a placeholder).
+**Last updated:** 2026-04-22 — Session 003 (checkpoint 19 — README refresh + Macro page build-out)
+**Active sprint:** Sprint 5 — Packaging & Distribution (freeze ✅, bundle ✅, CI workflow ✅, Release workflow ✅, updater plugin ✅, release docs ✅, PR #1 merged ✅, PR #2 merged ✅, v0.1.0 tagged ✅, draft release cut ✅, CI-built `.dmg` smoke-tested ✅, README refreshed for Phase 1 completion ✅ (PR #4), Macro page built out ✅ (PR #3); publish button + optional GUI smoke pass pending user decision) — plus a belated Sprint 3 follow-up: Macro page built out (was a placeholder).
 **Overall status:** 🟢 Sprints 1–4 complete. Sprint 5 effectively done — v0.1.0 draft release sitting on GitHub with three installers attached: `FinTrack_0.1.0_aarch64.dmg` (48 MB), `FinTrack_0.1.0_x64_en-US.msi` (50 MB), `FinTrack_0.1.0_x64-setup.exe` (39 MB). No updater bundles (expected — `TAURI_SIGNING_PRIVATE_KEY` not yet set). CI `.dmg` verified: mounts clean, `FinTrack.app` carries the right identifier `com.fintrack.app` + version 0.1.0, adhoc-signed (unsigned build, as expected), frozen sidecar inside bundles correctly and boots to `/api/health/` in ~3 s. The last click is publishing the draft → live.
 
 ### What was just completed (Sprint 2 first pass)
@@ -184,6 +184,21 @@ User flagged during Sprint 5 close-out that `/macro` was still a placeholder —
 - **Formatting helpers**: `fmtValue(n, units)` detects Percent units (`/percent|%/i.test(units)`) and appends `%` — so CPIAUCSL shows `"315.60"` while UNRATE shows `"3.80%"`. `fmtDate(iso)` parses `"YYYY-MM-DD"` as UTC midnight (timezone-safe). `fmtPct` handles the relative-change display with sign.
 - **Dark mode**: `useResolvedTheme()` → palette toggle in the chart; Tailwind `dark:` variants everywhere else.
 - **Verifications**: `pnpm -C shell lint` clean, `pnpm -C shell build` clean — bundle went from 557 kB / 172 kB gzipped (Sprint 4 end) to **569 kB / 175 kB gzipped** (+12 kB raw / +3 kB gzipped for MacroLineChart + Macro page). No new dependencies — uses the existing `lightweight-charts`, `lucide-react`, `react-router-dom`.
+- **Shipped as PR #3** (`645626e`, rebase-merged on main) after CI both jobs green (Shell 20 s, Sidecar 47 s).
+
+### What was completed (README refresh — PR #4, `8c6c7b6`)
+The top-level `README.md` had been stuck on Sprint 1 state since project kickoff — described the active sprint as Sprint 1, pointed at a non-existent `docs/development/setup.md`, and had no user-facing install instructions. Refreshed for Phase 1 completion:
+- **"What it does"** section enumerates every shipping feature (Dashboard + sparklines, Asset detail with timeframes + measurement tool, Watchlists with drag-reorder + default-pinning, News with symbol filter + day grouping, Macro with FRED indicators + stats, Price alerts with desktop notifications, Market overview with top gainers/losers, Settings with theme + runtime config).
+- **Installation** section with per-platform downloads (`.dmg` / `.msi` / `-setup.exe`), the unsigned-build right-click step for first macOS launch, and OS app-data paths for the SQLite DB.
+- **Privacy** section spells out the data-flow invariants: outbound only to Yahoo Finance / CoinGecko / FRED, no telemetry, sidecar bound to `127.0.0.1` only, DB file is user-owned.
+- **Development** section rewritten with actually-working commands, `FINTRACK_EXTERNAL_SIDECAR` dev-mode escape hatch, and a pointer to `docs/development/release_process.md`.
+- **Project layout** tree updated to match reality (services/, sidecar.spec, requirements-packaging.txt).
+- Verifications: both LICENSE and `docs/development/release_process.md` links resolve. CI both jobs green on PR #4 (Shell 20 s, Sidecar 51 s).
+
+### Housekeeping sweep (same session)
+- Scanned `DECISIONS.md` — all 13 decisions are "resolved" or "superseded"; no open items to act on.
+- Scanned source tree for `TODO`/`FIXME`/`XXX`/`HACK` — none. Codebase is clean.
+- Bundle identifier `com.fintrack.app` is technically malformed (ends in `.app`) — flagged as a v0.1.1 follow-up. Not changing now because v0.1.0 draft release is already built with the current identifier and changing mid-tag would require re-tagging + re-uploading. Defer to the next tag cut.
 
 ### What to work on NEXT (in order)
 1. [ ] **Confirm the re-triggered release workflow produces a draft release** with all four artifacts attached (`.dmg`, `.msi`, `-setup.exe`, and any updater bundles that happen to exist). If the macOS build still fails, read the step log and iterate — next likely culprits are (a) yfinance/feedparser data-file inclusion in the PyInstaller spec on the runner's Python 3.13 vs. local 3.13, (b) xattr "resource fork" errors on the frozen sidecar (document already mentions `xattr -cr dist/fintrack-sidecar/` as the fix).
