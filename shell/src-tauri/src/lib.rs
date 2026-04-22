@@ -5,7 +5,8 @@ use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tauri::{Manager, RunEvent, State, WindowEvent};
+use tauri::path::BaseDirectory;
+use tauri::{AppHandle, Manager, RunEvent, State, WindowEvent};
 
 struct SidecarState {
     port: u16,
@@ -32,13 +33,61 @@ fn venv_python(root: &Path) -> PathBuf {
     }
 }
 
-fn spawn_sidecar(port: u16) -> std::io::Result<Child> {
-    let root = repo_root();
-    Command::new(venv_python(&root))
-        .args(["-m", "sidecar.main"])
-        .current_dir(&root)
-        .env("FINTRACK_PORT", port.to_string())
-        .spawn()
+/// Return the path to the bundled PyInstaller-frozen sidecar binary if present.
+///
+/// In release builds, `tauri.conf.json` bundles `dist/fintrack-sidecar/` as
+/// a resource. Because the source path uses `../..`, Tauri escapes those
+/// parent refs into `_up_/` segments when it copies files into the app
+/// bundle — on macOS, the binary lands at
+/// `FinTrack.app/Contents/Resources/_up_/_up_/dist/fintrack-sidecar/fintrack-sidecar`.
+/// We never hard-code that `_up_`-decorated path; `app.path().resolve()` with
+/// `BaseDirectory::Resource` applies the same encoding internally, so passing
+/// the original `../../dist/fintrack-sidecar/fintrack-sidecar` works on all
+/// platforms and across Tauri versions.
+///
+/// In dev (`pnpm tauri dev` / `cargo run`) the resource dir points at the
+/// Cargo target tree which has no frozen binary — `resolve()` returns a path
+/// that doesn't exist, we detect that via `is_file()`, return `None`, and the
+/// caller falls back to the `.venv/bin/python` spawn path. Hot-reload on the
+/// Python side stays intact — no need to re-freeze on every edit.
+fn find_frozen_sidecar(app: &AppHandle) -> Option<PathBuf> {
+    let binary_name = if cfg!(windows) {
+        "fintrack-sidecar.exe"
+    } else {
+        "fintrack-sidecar"
+    };
+    let rel = format!("../../dist/fintrack-sidecar/{binary_name}");
+    let candidate = app.path().resolve(&rel, BaseDirectory::Resource).ok()?;
+    if candidate.is_file() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn spawn_sidecar(app: &AppHandle, port: u16) -> std::io::Result<Child> {
+    if let Some(frozen) = find_frozen_sidecar(app) {
+        eprintln!("[sidecar] spawning frozen binary: {}", frozen.display());
+        // No `current_dir` — let the frozen sidecar fall through to
+        // `platformdirs.user_data_dir()` for DB path resolution in prod.
+        // The CWD heuristic in `sidecar/config.py` only picks `./fintrack.db`
+        // when it sees `pyproject.toml` + `sidecar/` in CWD, so inheriting
+        // whatever the OS gives us (likely `/` on macOS launchd) is correct.
+        Command::new(&frozen)
+            .env("FINTRACK_PORT", port.to_string())
+            .spawn()
+    } else {
+        let root = repo_root();
+        eprintln!(
+            "[sidecar] frozen binary not bundled — falling back to dev venv at {}",
+            root.display()
+        );
+        Command::new(venv_python(&root))
+            .args(["-m", "sidecar.main"])
+            .current_dir(&root)
+            .env("FINTRACK_PORT", port.to_string())
+            .spawn()
+    }
 }
 
 fn wait_for_health(port: u16, timeout: Duration) -> bool {
@@ -75,7 +124,7 @@ pub fn run() {
                 (8765u16, None)
             } else {
                 match pick_free_port() {
-                    Ok(p) => match spawn_sidecar(p) {
+                    Ok(p) => match spawn_sidecar(&app.handle(), p) {
                         Ok(c) => {
                             eprintln!("[sidecar] spawned pid {} on port {}", c.id(), p);
                             (p, Some(c))

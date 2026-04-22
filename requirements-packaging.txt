@@ -1,0 +1,10 @@
+# Packaging dependencies — only needed on release machines / CI.
+# Installed on top of requirements.txt (which contains the sidecar's runtime deps).
+# Kept out of requirements-dev.txt so day-to-day contributors don't pay the install
+# cost (PyInstaller pulls down a big wheel chain: altgraph, pefile, pyinstaller-hooks).
+#
+# Usage:
+#   pip install -r requirements.txt -r requirements-packaging.txt
+#   pyinstaller sidecar.spec --clean --noconfirm
+
+pyinstaller>=6.6,<7.0
