@@ -1,5 +1,6 @@
 import { useLocation } from "react-router-dom";
 import { HealthIndicator } from "../components/HealthIndicator";
+import { NotificationCenter } from "../components/NotificationCenter";
 import { ThemeToggle } from "../components/ThemeToggle";
 
 function titleForPath(pathname: string): string {
@@ -26,6 +27,7 @@ export function Header() {
       </h1>
       <div className="flex items-center gap-3">
         <HealthIndicator />
+        <NotificationCenter />
         <ThemeToggle />
       </div>
     </header>
