@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
@@ -32,4 +33,21 @@ export function applyTheme(resolved: ResolvedTheme): void {
   const root = document.documentElement;
   if (resolved === "dark") root.classList.add("dark");
   else root.classList.remove("dark");
+}
+
+function subscribeSystemTheme(callback: () => void): () => void {
+  const mql = window.matchMedia("(prefers-color-scheme: dark)");
+  mql.addEventListener("change", callback);
+  return () => mql.removeEventListener("change", callback);
+}
+
+function getSystemIsDark(): boolean {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+export function useResolvedTheme(): ResolvedTheme {
+  const mode = useSettings((s) => s.theme);
+  const systemDark = useSyncExternalStore(subscribeSystemTheme, getSystemIsDark);
+  if (mode === "system") return systemDark ? "dark" : "light";
+  return mode;
 }
