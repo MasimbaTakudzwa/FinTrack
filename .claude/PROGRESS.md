@@ -12,9 +12,9 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-22 — Session 003 (checkpoint 7 — Sprint 3 complete via 3F full-path)
+**Last updated:** 2026-04-22 — Session 003 (checkpoint 8 — cold-start bug fix: interval jobs now fire immediately)
 **Active sprint:** Sprint 3 — React UI Dashboard (complete; Sprint 4 next)
-**Overall status:** 🟢 Sprints 1, 2 & 3 complete — dashboard, asset detail chart, market overview, and a full mutable-settings stack (DB-backed config + scheduler reconfigure + Settings UI)
+**Overall status:** 🟢 Sprints 1, 2 & 3 complete — dashboard, asset detail chart, market overview, full mutable-settings stack, and interval jobs now populate data on first launch instead of after one full interval
 
 ### What was just completed (Sprint 2 first pass)
 - **PricePoint model + migration**: `sidecar/db/models.py` — `PricePoint` with FK to `assets`, `Numeric(18,6)` for o/h/l/c, `BigInteger` volume, composite index `ix_price_points_asset_ts` on `(asset_id, timestamp)`, unique constraint `uq_price_points_asset_ts` for dedup. Alembic migration `0002_create_price_points.py` — runs cleanly on top of 0001. Asset ↔ PricePoint relationship wired with `cascade="all, delete-orphan"`
@@ -53,6 +53,13 @@
   - **Tests**: `test_migrations.py` adds settings-table check; `test_settings_service.py` covers precedence (default/env/db), int bounds, bool string parsing, atomic failure, secret clear, `reset_to_default`; `test_api_config.py` covers GET shape, masked secret, PUT int/bool/secret, 422 validation, empty-secret clearing, atomic failure; `test_scheduler_reconfigure.py` spins up a real `BackgroundScheduler` in `paused` mode (jobs actually persist to jobstore) — covers add, enable-toggle add/remove, in-place interval update, cron-hour change, reconfigure on non-running scheduler returns False, reconfigure after service `apply_updates` picks up new values.
   - **Verifications**: `pytest` 80/80 green, `ruff check .` clean, `mypy --strict sidecar/` clean on 28 files, `pnpm lint` clean, `pnpm build` clean (437 kB JS / 138 kB gzipped).
 
+### Post-3F bug fix — cold-start empty dashboard
+- **Symptom**: on `pnpm tauri dev`, Dashboard sparklines showed 0 bars and AssetDetail showed "no data" even after clicking Refresh — the backend genuinely had 0 `price_points` rows (verified via `sqlite3 fintrack.db "SELECT COUNT(*) FROM price_points"`). The DB path wasn't the issue: Tauri's `spawn_sidecar` already calls `.current_dir(&root)` so the repo-root `./fintrack.db` is used correctly.
+- **Root cause**: APScheduler's `IntervalTrigger(minutes=5)` schedules the FIRST fire at `now + 5 min`, not immediately on scheduler start. So for the first 5 minutes after a cold launch, no bars exist — the same would happen on every fresh machine.
+- **Fix (`sidecar/scheduler/__init__.py`)**: pass `next_run_time=datetime.now(UTC)` to the two interval jobs (`ingest_prices`, `ingest_crypto`) inside `_register_jobs`. Fires once immediately when the scheduler starts, then settles into normal cadence. Cron-triggered `ingest_macro` is intentionally unchanged — it should honour its scheduled hour, not fire on every start. Side-benefit: when the user saves new interval values from Settings, `reconfigure()` → `_register_jobs()` now also triggers an immediate refresh, which matches user intent ("I changed the interval, show me new data").
+- **New test** (`test_register_jobs_fires_interval_jobs_immediately_on_first_register`) asserts `next_run_time` for both interval jobs lands inside the `_register_jobs()` call window (±1 s).
+- **Verifications**: `pytest` 81/81 green, `ruff check .` clean, `mypy --strict sidecar/` clean on 28 files.
+
 ### What to work on NEXT (in order)
 1. [ ] **Live GUI verification** — run `pnpm tauri dev` to smoke-test the full Sprint 3 surface: Dashboard → AssetCard click → AssetDetail candle chart, Refresh, theme toggle (system/light/dark), nav-link active states, Market overview links, Settings page (load, change an int, save, observe source badge flip to `db`, clear it, revert to `env`, change theme).
 2. [ ] **Sprint 4 — News, Watchlists & Desktop Alerts** — next sprint. See SPRINT BACKLOG for tasks.
@@ -77,6 +84,7 @@
 - **Tauri v2 template split**: entry is `src-tauri/src/lib.rs`, not `main.rs`
 - **ESLint flat config gotcha**: use `reactHooks.configs.flat["recommended-latest"]`, and `pnpm -C <dir>` (not `--prefix` which is npm-only)
 - **APScheduler `replace_existing` needs a started scheduler**: on an unstarted BackgroundScheduler, `add_job` stages jobs in a pending list and `get_job` reads from the jobstore — so `add_job(replace_existing=True)` appears to no-op when verifying in tests. Fix: call `scheduler.start(paused=True)` in the test fixture so jobs flush to the jobstore without the worker thread firing. Production code is unaffected (always calls `start()`).
+- **APScheduler `IntervalTrigger` first fire defaults to `now + interval`, NOT now**: cold-starting a sidecar with a 5-min interval job leaves the dashboard empty for 5 minutes. Pass `next_run_time=datetime.now(UTC)` to `add_job` to get an immediate first fire. Only apply to interval jobs — cron jobs should honour their wall-clock schedule.
 - **Settings precedence rule**: DB row > env var > hardcoded default. Set via env vars you want pinned for dev/tests/CI; once a user writes via the UI, the DB row takes over. `FINTRACK_ENABLE_SCHEDULER`/`FINTRACK_ENABLE_SEED` deliberately stay env-only (kill switches), as do `FINTRACK_PORT`/`FINTRACK_DB_PATH`/`LOG_LEVEL` (runtime-required or restart-required).
 - **`ingest_macro` reads FRED key lazily**: job calls `load_effective_config()` on each invocation so `/api/config/` updates take effect without a sidecar restart. The scheduler's add-or-remove decision for the macro job itself also uses effective config (via `_register_jobs`).
 - Phase 1 dev runs unsigned binaries — code signing deferred to Sprint 5

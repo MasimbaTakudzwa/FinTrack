@@ -9,6 +9,7 @@ deterministic while still covering the real reconfigure code paths.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -109,6 +110,32 @@ def test_register_jobs_updates_interval_in_place(
         paused_scheduler.get_job("ingest_prices").trigger.interval.total_seconds()
         == 1200
     )
+
+
+def test_register_jobs_fires_interval_jobs_immediately_on_first_register(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    """Interval jobs must have ``next_run_time`` set to ~now, not now+interval.
+
+    Without this, a freshly-launched sidecar shows an empty dashboard for the
+    first 5-15 minutes because ``ingest_prices`` hasn't fired yet.
+    """
+    before = datetime.now(UTC)
+    _register_jobs(
+        paused_scheduler,
+        dict(DEFAULT_CONFIG, **{"ingest_crypto.enabled": True}),
+    )
+    after = datetime.now(UTC)
+
+    prices_job = paused_scheduler.get_job("ingest_prices")
+    crypto_job = paused_scheduler.get_job("ingest_crypto")
+    assert prices_job is not None and prices_job.next_run_time is not None
+    assert crypto_job is not None and crypto_job.next_run_time is not None
+
+    # next_run_time lands in the window straddling the _register_jobs call.
+    window = (before - timedelta(seconds=1), after + timedelta(seconds=1))
+    assert window[0] <= prices_job.next_run_time <= window[1]
+    assert window[0] <= crypto_job.next_run_time <= window[1]
 
 
 def test_reconfigure_returns_false_when_scheduler_not_running(

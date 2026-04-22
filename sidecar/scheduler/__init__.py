@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from datetime import UTC, datetime
 from threading import Lock
 from typing import Any
 
@@ -44,13 +45,21 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
     `replace_existing=True` upserts in the persistent jobstore; missing jobs
     are removed via `remove_job` (wrapped in suppress to tolerate a not-yet-
     seeded jobstore on first start).
+
+    Interval-triggered jobs are scheduled with ``next_run_time=now`` so a
+    freshly-launched sidecar populates data immediately instead of waiting a
+    full interval (otherwise the dashboard shows empty price history for the
+    first 5-15 minutes after cold start).
     """
+    now = datetime.now(UTC)
+
     scheduler.add_job(
         ingest_prices,
         trigger=IntervalTrigger(minutes=int(config["ingest_prices.interval_minutes"])),
         id="ingest_prices",
         name="Ingest OHLCV prices from yfinance",
         replace_existing=True,
+        next_run_time=now,
     )
 
     if bool(config["ingest_crypto.enabled"]):
@@ -62,6 +71,7 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
             id="ingest_crypto",
             name="Ingest OHLC crypto prices from CoinGecko",
             replace_existing=True,
+            next_run_time=now,
         )
     else:
         with contextlib.suppress(JobLookupError):
