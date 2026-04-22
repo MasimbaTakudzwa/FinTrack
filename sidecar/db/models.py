@@ -155,6 +155,59 @@ class ArticleAsset(Base):
     )
 
 
+class Watchlist(Base):
+    """A named list of assets the user is tracking.
+
+    Single-user app: `name` is unique; exactly one watchlist has `is_default=True`
+    at any given time (the Dashboard reads from this one). The default cannot be
+    deleted; renaming is allowed.
+    """
+
+    __tablename__ = "watchlists"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+
+    items: Mapped[list[WatchlistItem]] = relationship(
+        back_populates="watchlist",
+        cascade="all, delete-orphan",
+        order_by="WatchlistItem.position",
+    )
+
+
+class WatchlistItem(Base):
+    """An asset on a watchlist. `position` is 0-indexed, dense, caller-maintained."""
+
+    __tablename__ = "watchlist_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    watchlist_id: Mapped[int] = mapped_column(
+        ForeignKey("watchlists.id", ondelete="CASCADE"), index=True
+    )
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(default=0)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+
+    watchlist: Mapped[Watchlist] = relationship(back_populates="items")
+    asset: Mapped[Asset] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "watchlist_id", "asset_id", name="uq_watchlist_items_list_asset"
+        ),
+    )
+
+
 class Setting(Base):
     """Key-value runtime settings persisted in SQLite.
 

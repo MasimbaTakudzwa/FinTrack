@@ -10,6 +10,7 @@ function titleForPath(pathname: string): string {
   }
   if (pathname.startsWith("/market")) return "Market";
   if (pathname.startsWith("/news")) return "News";
+  if (pathname.startsWith("/watchlists")) return "Watchlists";
   if (pathname.startsWith("/macro")) return "Macro";
   if (pathname.startsWith("/settings")) return "Settings";
   return "FinTrack";

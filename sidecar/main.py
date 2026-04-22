@@ -18,9 +18,11 @@ from sidecar.api.health import router as health_router
 from sidecar.api.macro import router as macro_router
 from sidecar.api.news import router as news_router
 from sidecar.api.prices import router as prices_router
+from sidecar.api.watchlists import router as watchlists_router
 from sidecar.config import settings
 from sidecar.db.migrations_runner import upgrade_to_head
 from sidecar.db.seed import seed_all_defaults
+from sidecar.services.watchlists import seed_default_watchlist
 
 PARENT_WATCHDOG_INTERVAL_SECONDS = 2.0
 
@@ -51,6 +53,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 )
         except Exception:
             logger.exception("Seeding defaults failed (continuing)")
+        try:
+            # Runs every startup: creates the default watchlist if missing, and
+            # back-fills any newly-seeded assets onto it (idempotent).
+            added = seed_default_watchlist()
+            if added:
+                logger.info("Appended %d assets to the default watchlist", added)
+        except Exception:
+            logger.exception("Seeding default watchlist failed (continuing)")
 
     if settings.enable_scheduler:
         try:
@@ -78,6 +88,7 @@ app.include_router(assets_router)
 app.include_router(prices_router)
 app.include_router(macro_router)
 app.include_router(news_router)
+app.include_router(watchlists_router)
 app.include_router(config_router)
 
 

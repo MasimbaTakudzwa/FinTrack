@@ -1,15 +1,23 @@
 import { useEffect, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { Link } from "react-router-dom";
+import { ListPlus, RefreshCw } from "lucide-react";
 import {
+  ApiError,
   type Asset,
   type PriceSeries,
+  type WatchlistDetail,
+  getDefaultWatchlist,
   getPriceSeries,
   listAssets,
 } from "../api/client";
 import { AssetCard } from "../components/AssetCard";
 
 interface LoadState {
+  /** Ordered list of assets to render. Driven by the default watchlist when present. */
   assets: Asset[];
+  watchlistName: string | null;
+  /** True when no default watchlist exists (vs. exists-but-empty). */
+  noDefault: boolean;
   series: Record<string, PriceSeries>;
   errors: Record<string, string>;
   assetsError: string | null;
@@ -18,6 +26,8 @@ interface LoadState {
 
 const INITIAL: LoadState = {
   assets: [],
+  watchlistName: null,
+  noDefault: false,
   series: {},
   errors: {},
   assetsError: null,
@@ -27,7 +37,35 @@ const INITIAL: LoadState = {
 async function loadAll(
   signal: AbortSignal,
 ): Promise<Omit<LoadState, "loading">> {
-  const assets = await listAssets({ signal });
+  // Pull both the default watchlist and every known asset. The watchlist drives
+  // ordering and filters; the full asset list is the fallback when there isn't
+  // one yet (first-run, before seed_default_watchlist runs).
+  let detail: WatchlistDetail | null = null;
+  let noDefault = false;
+  try {
+    detail = await getDefaultWatchlist(signal);
+  } catch (err) {
+    // A 404 means no default exists yet — show all active assets so the
+    // dashboard is never blank before migrations+seed complete.
+    if (err instanceof ApiError && err.status === 404) {
+      noDefault = true;
+    } else {
+      throw err;
+    }
+  }
+
+  const allAssets = await listAssets({ activeOnly: false, signal });
+
+  let assets: Asset[];
+  if (detail) {
+    const byId = new Map(allAssets.map((a) => [a.id, a]));
+    assets = detail.items
+      .map((item) => byId.get(item.asset_id))
+      .filter((a): a is Asset => a !== undefined);
+  } else {
+    assets = allAssets.filter((a) => a.is_active);
+  }
+
   const series: Record<string, PriceSeries> = {};
   const errors: Record<string, string> = {};
   await Promise.all(
@@ -42,7 +80,14 @@ async function loadAll(
       }
     }),
   );
-  return { assets, series, errors, assetsError: null };
+  return {
+    assets,
+    watchlistName: detail?.name ?? null,
+    noDefault,
+    series,
+    errors,
+    assetsError: null,
+  };
 }
 
 export function Dashboard() {
@@ -76,28 +121,42 @@ export function Dashboard() {
     setTick((t) => t + 1);
   };
 
+  const title = state.watchlistName ?? "Watchlist";
+  const subtitle = state.loading
+    ? "Loading assets…"
+    : state.noDefault
+      ? `${state.assets.length} active asset${state.assets.length === 1 ? "" : "s"} · no default watchlist`
+      : state.watchlistName
+        ? `${state.assets.length} asset${state.assets.length === 1 ? "" : "s"} on "${state.watchlistName}"`
+        : `${state.assets.length} active asset${state.assets.length === 1 ? "" : "s"}`;
+
   return (
     <div className="p-6">
       <div className="mb-5 flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
-            Watchlist
+            {title}
           </h2>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            {state.loading
-              ? "Loading assets…"
-              : `${state.assets.length} active asset${state.assets.length === 1 ? "" : "s"}`}
-          </p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">{subtitle}</p>
         </div>
-        <button
-          type="button"
-          onClick={refresh}
-          disabled={state.loading}
-          className="inline-flex items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${state.loading ? "animate-spin" : ""}`} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <Link
+            to="/watchlists"
+            className="inline-flex items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            <ListPlus className="h-3.5 w-3.5" />
+            Manage
+          </Link>
+          <button
+            type="button"
+            onClick={refresh}
+            disabled={state.loading}
+            className="inline-flex items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${state.loading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {state.assetsError && (
@@ -108,7 +167,22 @@ export function Dashboard() {
 
       {!state.loading && state.assets.length === 0 && !state.assetsError && (
         <div className="rounded-lg border border-dashed border-zinc-300 bg-zinc-50 p-8 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:bg-zinc-900/60 dark:text-zinc-400">
-          No active assets yet. Run the sidecar with seed enabled to populate defaults.
+          {state.noDefault ? (
+            <>
+              No active assets yet. Run the sidecar with seed enabled to populate defaults.
+            </>
+          ) : (
+            <>
+              <p>Your default watchlist is empty.</p>
+              <Link
+                to="/watchlists"
+                className="mt-3 inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
+              >
+                <ListPlus className="h-3.5 w-3.5" />
+                Add assets to "{state.watchlistName ?? "Default"}"
+              </Link>
+            </>
+          )}
         </div>
       )}
 

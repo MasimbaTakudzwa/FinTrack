@@ -57,25 +57,66 @@ async function apiPut<T, B>(
   body: B,
   opts: { signal?: AbortSignal } = {},
 ): Promise<T> {
+  return apiJson<T, B>("PUT", path, body, opts);
+}
+
+async function apiPost<T, B>(
+  path: string,
+  body: B,
+  opts: { signal?: AbortSignal } = {},
+): Promise<T> {
+  return apiJson<T, B>("POST", path, body, opts);
+}
+
+async function apiJson<T, B>(
+  method: "POST" | "PUT",
+  path: string,
+  body: B,
+  opts: { signal?: AbortSignal },
+): Promise<T> {
   const base = await getBaseUrl();
   const url = `${base}${path}`;
   const res = await fetch(url, {
-    method: "PUT",
+    method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     signal: opts.signal,
   });
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const body = (await res.json()) as { detail?: unknown };
-      if (typeof body.detail === "string") detail = body.detail;
-    } catch {
-      // non-JSON response
-    }
-    throw new ApiError(res.status, url, `PUT ${path} → ${detail}`);
+    throw new ApiError(res.status, url, `${method} ${path} → ${await _detail(res, method, path)}`);
   }
+  // 204 No Content has an empty body.
+  if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+async function apiDelete(
+  path: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<void> {
+  const base = await getBaseUrl();
+  const url = `${base}${path}`;
+  const res = await fetch(url, {
+    method: "DELETE",
+    signal: opts.signal,
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, url, `DELETE ${path} → ${await _detail(res, "DELETE", path)}`);
+  }
+}
+
+async function _detail(
+  res: Response,
+  method: string,
+  path: string,
+): Promise<string> {
+  try {
+    const body = (await res.json()) as { detail?: unknown };
+    if (typeof body.detail === "string") return body.detail;
+  } catch {
+    // non-JSON or empty response
+  }
+  return `${method} ${path} HTTP ${res.status}`;
 }
 
 // ---------- Health ----------
@@ -287,6 +328,113 @@ export function putConfig(
   return apiPut<AppConfig, { updates: Record<string, ConfigUpdateValue> }>(
     "/api/config/",
     { updates },
+    { signal },
+  );
+}
+
+// ---------- Watchlists ----------
+
+export interface WatchlistSummary {
+  id: number;
+  name: string;
+  is_default: boolean;
+  item_count: number;
+}
+
+export interface WatchlistItem {
+  asset_id: number;
+  symbol: string;
+  name: string;
+  asset_type: string;
+  position: number;
+}
+
+export interface WatchlistDetail {
+  id: number;
+  name: string;
+  is_default: boolean;
+  items: WatchlistItem[];
+}
+
+export interface WatchlistList {
+  watchlists: WatchlistSummary[];
+}
+
+export function listWatchlists(signal?: AbortSignal): Promise<WatchlistList> {
+  return apiGet<WatchlistList>("/api/watchlists/", { signal });
+}
+
+export function getDefaultWatchlist(
+  signal?: AbortSignal,
+): Promise<WatchlistDetail> {
+  return apiGet<WatchlistDetail>("/api/watchlists/default/", { signal });
+}
+
+export function getWatchlist(
+  id: number,
+  signal?: AbortSignal,
+): Promise<WatchlistDetail> {
+  return apiGet<WatchlistDetail>(`/api/watchlists/${id}/`, { signal });
+}
+
+export function createWatchlist(
+  body: { name: string; is_default?: boolean },
+  signal?: AbortSignal,
+): Promise<WatchlistSummary> {
+  return apiPost<WatchlistSummary, { name: string; is_default?: boolean }>(
+    "/api/watchlists/",
+    body,
+    { signal },
+  );
+}
+
+export function updateWatchlist(
+  id: number,
+  body: { name?: string; is_default?: boolean },
+  signal?: AbortSignal,
+): Promise<WatchlistSummary> {
+  return apiPut<WatchlistSummary, typeof body>(
+    `/api/watchlists/${id}/`,
+    body,
+    { signal },
+  );
+}
+
+export function deleteWatchlist(
+  id: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  return apiDelete(`/api/watchlists/${id}/`, { signal });
+}
+
+export function addWatchlistItem(
+  id: number,
+  assetId: number,
+  signal?: AbortSignal,
+): Promise<WatchlistItem> {
+  return apiPost<WatchlistItem, { asset_id: number }>(
+    `/api/watchlists/${id}/items/`,
+    { asset_id: assetId },
+    { signal },
+  );
+}
+
+export function removeWatchlistItem(
+  id: number,
+  assetId: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  return apiDelete(`/api/watchlists/${id}/items/${assetId}/`, { signal });
+}
+
+export function reorderWatchlistItems(
+  id: number,
+  assetIds: number[],
+  signal?: AbortSignal,
+): Promise<void> {
+  return apiPut<void, { asset_ids: number[] }>(
+    `/api/watchlists/${id}/items/reorder`,
+    { asset_ids: assetIds },
     { signal },
   );
 }

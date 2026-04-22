@@ -128,6 +128,56 @@ def test_upgrade_to_head_creates_article_tables(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_upgrade_to_head_creates_watchlist_tables(tmp_path: Path) -> None:
+    db_file = tmp_path / "test.db"
+    upgrade_to_head(db_path=str(db_file))
+
+    conn = sqlite3.connect(db_file)
+    try:
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "watchlists" in tables
+        assert "watchlist_items" in tables
+
+        wl_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(watchlists)").fetchall()
+        }
+        assert {"id", "name", "is_default", "created_at"} <= wl_cols
+
+        # Partial unique index on is_default (exactly-one-default guarantee).
+        wl_indexes = {
+            r[1] for r in conn.execute("PRAGMA index_list(watchlists)").fetchall()
+        }
+        assert "ux_watchlists_default_one" in wl_indexes
+
+        item_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(watchlist_items)").fetchall()
+        }
+        assert {"id", "watchlist_id", "asset_id", "position", "added_at"} <= item_cols
+
+        item_indexes = {
+            r[1]
+            for r in conn.execute("PRAGMA index_list(watchlist_items)").fetchall()
+        }
+        assert "ix_watchlist_items_watchlist_id" in item_indexes
+        assert "ix_watchlist_items_asset_id" in item_indexes
+
+        fks = conn.execute(
+            "PRAGMA foreign_key_list(watchlist_items)"
+        ).fetchall()
+        tables_referenced = {fk[2] for fk in fks}
+        assert {"watchlists", "assets"} <= tables_referenced
+        # Both FKs should cascade on delete.
+        for fk in fks:
+            assert fk[6] == "CASCADE", f"FK to {fk[2]} must cascade on delete"
+    finally:
+        conn.close()
+
+
 def test_upgrade_to_head_creates_macro_tables(tmp_path: Path) -> None:
     db_file = tmp_path / "test.db"
     upgrade_to_head(db_path=str(db_file))

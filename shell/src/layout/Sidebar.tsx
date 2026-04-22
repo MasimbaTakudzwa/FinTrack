@@ -3,6 +3,7 @@ import {
   LineChart,
   Newspaper,
   Settings as SettingsIcon,
+  Star,
   TrendingUp,
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
@@ -16,6 +17,7 @@ interface NavItem {
 
 const ITEMS: NavItem[] = [
   { to: "/", label: "Dashboard", icon: LineChart, end: true },
+  { to: "/watchlists", label: "Watchlists", icon: Star },
   { to: "/market", label: "Market", icon: TrendingUp },
   { to: "/news", label: "News", icon: Newspaper },
   { to: "/macro", label: "Macro", icon: Activity },
