@@ -34,6 +34,23 @@ won't auto-update.
 
 ## Prerequisites
 
+### Local tools you need installed
+
+```bash
+# GitHub CLI — used throughout this runbook for tags, run watches, releases
+brew install gh                          # macOS
+# or: winget install --id GitHub.cli     # Windows
+
+# First-time auth (interactive)
+gh auth login                            # pick GitHub.com → HTTPS → browser
+
+# Verify
+gh auth status
+```
+
+All the `gh` commands below assume you're logged in. If you prefer to stay
+in the browser entirely, each `gh` call has a web-UI equivalent noted inline.
+
 ### One-time setup (already done for this repo)
 
 - `sidecar.spec` — PyInstaller one-folder spec producing `dist/fintrack-sidecar/`
@@ -169,6 +186,7 @@ This kicks off `release.yml`. Watch the run:
 
 ```bash
 gh run watch
+# or open in browser:  https://github.com/MasimbaTakudzwa/FinTrack/actions
 ```
 
 Expected duration: ~8–12 minutes (sidecar freeze + Rust build dominates).
@@ -179,6 +197,7 @@ The workflow creates a draft release with artifacts attached. Inspect it:
 
 ```bash
 gh release view v0.1.0
+# or open in browser:  https://github.com/MasimbaTakudzwa/FinTrack/releases
 ```
 
 - Verify the `.dmg`, `.msi`, and `-setup.exe` are present and roughly the
@@ -191,6 +210,8 @@ When ready, publish:
 
 ```bash
 gh release edit v0.1.0 --draft=false
+# or in browser: Releases page → "v0.1.0" → Edit → uncheck "Set as a pre-release"
+# and uncheck "Save as draft" → Publish release
 ```
 
 ---
