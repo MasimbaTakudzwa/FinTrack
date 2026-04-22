@@ -299,11 +299,20 @@ def ingest_macro() -> int:
         ]
         if not payload:
             return 0
-        stmt = sqlite_insert(MacroDataPoint).values(payload).on_conflict_do_nothing(
-            index_elements=["indicator_id", "date"]
-        )
-        result = cast(CursorResult[object], session.execute(stmt))
-        inserted = result.rowcount or 0
+        # Chunk the bulk insert: FRED backfills return decades of observations
+        # (monthly CPI since 1947 → ~950 rows; daily DGS10 since 1962 → ~16K
+        # rows) and at 3 bound params per row the full payload easily exceeds
+        # SQLite's 32766-variable statement limit. 500 rows ≈ 1500 params keeps
+        # us well under the cap on every SQLite build we might ship against.
+        inserted = 0
+        chunk_size = 500
+        for offset in range(0, len(payload), chunk_size):
+            chunk = payload[offset : offset + chunk_size]
+            stmt = sqlite_insert(MacroDataPoint).values(chunk).on_conflict_do_nothing(
+                index_elements=["indicator_id", "date"]
+            )
+            result = cast(CursorResult[object], session.execute(stmt))
+            inserted += result.rowcount or 0
         logger.info(
             "ingest_macro: inserted %d new points from %d fetched across %d indicators",
             inserted,
