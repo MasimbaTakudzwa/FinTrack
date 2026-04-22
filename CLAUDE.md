@@ -8,47 +8,51 @@
 
 ## Project Identity
 
-- **Name:** FinTrack — Market Intelligence Platform
-- **Purpose:** Real-time market data tracking (stocks, ETFs, commodities, crypto) with news aggregation, portfolio tools, and Phase 2 ML price prediction
-- **Stack:** Django 4.2 LTS + DRF / React / PostgreSQL (Neon) / Upstash Redis / Celery / Docker (local dev) / Render.com + Vercel (hosting)
-- **Repo root:** `~/projects/FinTrack`  ← update to your local path
-- **Current phase:** Phase 1 — Market Tracking Platform
+- **Name:** FinTrack — Market Intelligence Desktop App
+- **Purpose:** Cross-platform desktop application for tracking live market data (stocks, ETFs, commodities, crypto), aggregating financial news, and (Phase 2) local ML forecasting
+- **Form factor:** Native desktop app — macOS & Windows (Linux deferred)
+- **Stack:** Tauri v2 + React + FastAPI (Python sidecar) + SQLite + APScheduler
+- **Current phase:** Phase 1 — Desktop scaffold & market tracking
+- **User model:** Single-user, local-only. No cloud services, no authentication, no external hosting
 
 ---
 
-## Free Hosting Stack (zero cost)
+## Stack at a Glance
 
-| Layer | Service | Notes |
-|-------|---------|-------|
-| Django backend | Render.com (free web service) | Spins down after 15min inactivity |
-| Celery worker | Render.com (free background worker) | 1 free worker |
-| PostgreSQL | Neon (free tier, 0.5GB) | Serverless, no cold start on DB |
-| Redis | Upstash (free tier, 256MB) | 10k commands/day — Celery broker + cache |
-| React frontend | Vercel (free) | Unlimited deploys |
-| Market data | yfinance + CoinGecko + FRED | No API keys needed (FRED: free key) |
+| Layer | Technology | Notes |
+|-------|------------|-------|
+| Desktop shell | Tauri v2 (Rust) | Lightweight, native webview, small installer |
+| UI | React 18 + TypeScript + Vite + Tailwind + Zustand | Renders inside Tauri window |
+| Charts | TradingView Lightweight Charts | Free, MIT, performant |
+| Backend sidecar | FastAPI + uvicorn (Python) | Localhost HTTP, random ephemeral port |
+| ORM | SQLAlchemy 2.x | Async where useful |
+| Database | SQLite | Stored in OS app-data dir (dev: `./fintrack.db`) |
+| Migrations | Alembic | Auto-run on app startup |
+| Scheduler | APScheduler | Runs in-process inside sidecar |
+| Data sources | yfinance, CoinGecko, FRED, Yahoo RSS | All free, no paid APIs |
+| Packaging | Tauri bundler + PyInstaller | `.dmg` (Mac), `.msi` (Win) |
 
 ---
 
 ## Quick-Start Commands (local dev)
 
 ```bash
-# First time
-./install-fintrack.sh
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-python manage.py migrate
-python manage.py runserver
+# Python sidecar (one-time)
+python -m venv .venv
+source .venv/bin/activate                # Windows: .venv\Scripts\activate
+pip install -r requirements.txt -r requirements-dev.txt
 
-# Celery (separate terminals)
-celery -A config worker -l info
-celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+# Run sidecar standalone
+python -m sidecar.main                   # FastAPI on a random localhost port
 
-# Frontend
-cd frontend && npm install && npm run dev
+# Run full app (Tauri spawns sidecar as child)
+cd shell && pnpm install && pnpm tauri dev
 
 # Tests + lint
-python manage.py test
-ruff check . && mypy backend/
+pytest
+ruff check .
+mypy sidecar/
+pnpm --prefix shell lint
 ```
 
 ---
@@ -58,30 +62,32 @@ ruff check . && mypy backend/
 ```
 FinTrack/
 ├── CLAUDE.md                        ← this file (auto-loaded)
+├── README.md
+├── LICENSE
 ├── .claude/
 │   ├── PROGRESS.md                  ← READ THIS FIRST every session
 │   ├── ARCHITECTURE.md              ← deep design (@import on demand)
 │   ├── DECISIONS.md                 ← decisions log (@import on demand)
-│   └── commands/
-│       ├── session-start.md         ← /project:start
-│       ├── session-end.md           ← /project:end
-│       └── checkpoint.md            ← /project:checkpoint
-├── backend/
-│   ├── config/                      ← Django settings (base/dev/prod), urls, celery app
-│   └── apps/
-│       ├── market_data/             ← Asset, PricePoint models + DRF API
-│       └── news/                    ← Article model + DRF API
-├── data_pipeline/
-│   ├── ingestion/                   ← yfinance + CoinGecko + FRED fetchers
-│   └── processing/                  ← cleaning, normalisation, dedup
-├── ml_models/                       ← Phase 2 ONLY — do not touch in Phase 1
-├── frontend/                        ← React app (Vercel)
-├── infrastructure/                  ← Docker Compose (local dev only)
-├── scripts/                         ← management scripts
+│   └── commands/                    ← session slash-commands
+├── shell/                           ← Tauri app (Rust + React)
+│   ├── src/                         ← React UI (TS)
+│   ├── src-tauri/                   ← Tauri Rust config + sidecar launcher
+│   └── package.json
+├── sidecar/                         ← Python FastAPI backend
+│   ├── main.py                      ← uvicorn entrypoint
+│   ├── api/                         ← FastAPI route modules
+│   ├── db/                          ← SQLAlchemy engine, models, migrations
+│   ├── scheduler/                   ← APScheduler jobs
+│   └── ingestion/                   ← yfinance / CoinGecko / FRED / RSS fetchers
+├── ml/                              ← Phase 2 ONLY — local ML training
 ├── tests/
 ├── docs/
-├── requirements.txt                 ← core Django + pipeline deps
-├── requirements-dev.txt             ← dev/test only
+│   ├── architecture/
+│   ├── development/
+│   └── archive/                     ← original web-app plan docs (historical)
+├── pyproject.toml
+├── requirements.txt                 ← sidecar runtime deps
+├── requirements-dev.txt             ← dev/test deps
 └── requirements-ml.txt              ← Phase 2 ONLY — never install in Phase 1
 ```
 
@@ -89,8 +95,8 @@ FinTrack/
 
 ## Active Sprint
 
-> **Sprint 1 — Data Foundation**
-> Goal: Live market prices from yfinance into Neon PostgreSQL, queryable via `/api/prices/`
+> **Sprint 1 — Desktop Scaffold**
+> Goal: Tauri window opens, FastAPI sidecar starts, SQLite initialised, health check round-trips shell → sidecar → DB end-to-end
 > Tracking: @.claude/PROGRESS.md
 
 ---
@@ -98,13 +104,15 @@ FinTrack/
 ## Critical Rules
 
 1. **Read `.claude/PROGRESS.md` before writing any code.**
-2. **Never install `requirements-ml.txt` — Phase 2 only.**
-3. **All market data fetching lives in `data_pipeline/ingestion/` — never fetch inside Django views.**
-4. **Mark tasks [x] only after `python manage.py test` passes.**
-5. **Run `/project:checkpoint` after every 2-3 completed tasks.**
-6. **Run `/project:end` before ending any session.**
-7. **Django settings: always use split config — `config/settings/base.py`, `dev.py`, `prod.py`.**
-8. **Never commit `.env` — only `.env.example`. All secrets via environment variables.**
+2. **No cloud services. No Postgres, no Redis, no Celery, no Django.** If these appear in memory or older docs, they are pre-pivot artefacts — follow the current architecture.
+3. **All market data fetching lives in `sidecar/ingestion/` — never call external APIs from UI code.**
+4. **SQLite path resolution:** dev → `./fintrack.db` (gitignored); prod Mac → `~/Library/Application Support/FinTrack/fintrack.db`; prod Win → `%APPDATA%\FinTrack\fintrack.db`.
+5. **Sidecar binds to 127.0.0.1 only.** Never bind to 0.0.0.0. Port is chosen at runtime — never hardcode.
+6. **Mark tasks [x] only after `pytest` passes AND `pnpm tauri dev` launches cleanly.**
+7. **Run `/project:checkpoint` after every 2-3 completed tasks.**
+8. **Run `/project:end` before ending any session.**
+9. **Never commit `.env` — only `.env.example`. All secrets via environment variables.**
+10. **Phase 2 ML libs (`requirements-ml.txt`) are never installed during Phase 1.**
 
 ---
 
@@ -112,24 +120,24 @@ FinTrack/
 
 > Full details: @.claude/ARCHITECTURE.md
 
-- **Backend:** Django 4.2 + DRF — single project in `backend/`, split settings per environment
-- **Data sources:** `yfinance` (stocks/ETFs/crypto, no key) + `CoinGecko` (crypto, no key) + `FRED` (macro indicators, free key) — all free
-- **Scheduling:** Celery + `django-celery-beat` — periodic tasks stored in DB, managed via Django admin
-- **Database:** Neon free PostgreSQL — composite `(asset_id, timestamp)` indexes in place of TimescaleDB
-- **Cache/Broker:** Upstash Redis free tier
-- **Frontend:** React on Vercel, consuming DRF API
+- **Single-process desktop app:** Tauri shell spawns Python sidecar as a child. Shell ↔ sidecar over localhost HTTP on a random ephemeral port
+- **Data lives locally:** SQLite file in user's OS app-data directory. Full history kept — no retention policy needed
+- **Scheduler in-process:** APScheduler runs inside the sidecar with a `SQLAlchemyJobStore` so jobs persist across restarts
+- **Data sources (all free):** yfinance (stocks/ETFs/crypto), CoinGecko (crypto), FRED (macro), Yahoo RSS (news)
+- **UI:** React 18 + TS, rendered inside Tauri webview (WKWebView on Mac, WebView2 on Win)
+- **Alerts:** native desktop notifications via Tauri `notification` plugin — no email
 
 ---
 
 ## Known Gotchas
 
-- **Render.com free tier sleeps after 15min inactivity** — first request is slow (~30s). Use cron-job.org (free) to ping `/api/health/` every 10 min in production
-- **Upstash 10k commands/day** — keep Celery ingestion intervals ≥ 5 minutes on free tier
-- **yfinance throttling** — add `time.sleep(0.5)` between symbol fetches; use `yf.download(tickers=[...])` for batching
-- **Neon 0.5GB storage** — implement 90-day data retention on `price_points` to stay within limits
-- **No TimescaleDB** — composite index on `(asset_id, timestamp)` handles Phase 1 query load
-- **FRED key** — register free at fred.stlouisfed.org → store as `FRED_API_KEY` in `.env`
-- **Django admin** — use it as a free data inspection tool during development before frontend is built
+- **yfinance is unofficial** — Yahoo has broken it multiple times. Ingestion layer must be source-swappable so Alpha Vantage can be plugged in as fallback
+- **CoinGecko free tier:** ~10–50 calls/min. Add exponential backoff with jitter
+- **SQLite concurrency:** scheduler writes while UI reads. Always open with `PRAGMA journal_mode=WAL`, `synchronous=NORMAL`, `foreign_keys=ON`
+- **Random sidecar port:** pick a free port at Tauri startup, pass to child via `FINTRACK_PORT` env var, expose to frontend via a `get_sidecar_port()` Tauri command
+- **Cross-platform paths:** `pathlib.Path` (Python) and Tauri `path` API (Rust) — never hardcode `/` or `\`
+- **Laptop sleep/wake:** APScheduler `misfire_grace_time=60` — skip runs more than 60s late instead of queueing a backlog
+- **Code signing:** Mac (Apple Developer, $99/yr) + Windows (EV cert or Azure Trusted Signing). Deferred to Sprint 5 — Phase 1 dev runs unsigned
 
 ---
 

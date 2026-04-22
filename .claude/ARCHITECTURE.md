@@ -1,126 +1,216 @@
 # ARCHITECTURE.md — FinTrack Deep Architecture Reference
 # =========================================================
 # NOT auto-loaded. Import on demand: @.claude/ARCHITECTURE.md
-# Reference when: designing services, changing DB schema, adding infra.
+# Reference when: designing services, changing DB schema, adding ingestion sources.
 
 ---
 
 ## System Overview
 
-FinTrack is a two-phase market intelligence platform built entirely on a free hosting
-stack. Phase 1 delivers real-time price tracking for stocks, ETFs, commodities, and
-crypto — plus financial news aggregation and a user portfolio/watchlist dashboard.
-Phase 2 adds ML-driven price prediction and sentiment analysis on top of the Phase 1
-data layer.
+FinTrack is a **single-user, cross-platform desktop application** for tracking market
+data (stocks, ETFs, commodities, crypto), aggregating financial news, and (in Phase 2)
+running local ML-based price forecasting and news sentiment analysis.
 
-Django serves as the single backend — handling REST API, admin, auth, and Celery task
-orchestration. All external data fetching is free (yfinance, CoinGecko, FRED, Yahoo RSS).
+Everything runs on the user's machine. Data is stored locally in SQLite. There are
+no cloud services, no remote servers, no authentication, and no telemetry. The only
+network calls are outbound to free public data sources.
+
+Target platforms for Phase 1: macOS and Windows. Linux deferred to post-Phase-1.
 
 ---
 
-## Services & Components
+## Top-Level Architecture
 
-### Django Backend
-- **Framework:** Django 4.2 LTS + Django REST Framework
-- **Location:** `backend/`
-- **Settings:** `backend/config/settings/base.py` + `dev.py` + `prod.py`
-- **Local port:** 8000
-- **Production:** Render.com free web service
-- **Key Django apps:**
-  - `backend/apps/market_data/` — Asset, PricePoint models + DRF ViewSets + serialisers
-  - `backend/apps/news/` — Article model + DRF API
-  - `backend/apps/users/` — Custom user model, auth, Watchlist, PriceAlert (Sprint 2)
-- **Static files:** WhiteNoise middleware (no CDN needed on free tier)
-- **CORS:** `django-cors-headers` — Vercel origin whitelisted in prod settings
-
-### Celery Task Queue
-- **Broker:** Upstash Redis (free tier — use `rediss://` TLS URL from Upstash dashboard)
-- **Scheduler:** `django-celery-beat` — periodic task schedules stored in PostgreSQL, editable via Django admin
-- **Production:** Render.com free background worker (`celery -A config worker -l info`)
-- **Key tasks:**
-  - `ingest_prices` — runs every 5 min — fetches OHLCV from yfinance for all tracked assets
-  - `ingest_crypto` — runs every 5 min — fetches crypto prices from CoinGecko
-  - `ingest_news` — runs every 15 min — fetches Yahoo Finance RSS per symbol
-  - `prune_old_price_points` — runs daily — deletes price data older than 90 days
-
-### Database
-- **Engine:** PostgreSQL 15
-- **Production:** Neon free tier (0.5GB, serverless)
-- **Local dev:** `postgres:15` Docker container
-- **ORM:** Django ORM
-- **Migrations:** Django migrations (`python manage.py makemigrations && migrate`)
-- **Connection:** `dj-database-url` parses `DATABASE_URL` env var
-- **Key models:**
-
-```python
-# market_data/models.py
-class Asset(Model):
-    symbol    = CharField(unique=True)        # e.g. "AAPL", "BTC-USD"
-    name      = CharField()                   # e.g. "Apple Inc."
-    asset_type = CharField(choices=[...])     # stock | etf | crypto | commodity
-    exchange  = CharField()
-    is_active = BooleanField(default=True)
-
-class PricePoint(Model):
-    asset     = ForeignKey(Asset)
-    timestamp = DateTimeField(db_index=True)
-    open      = DecimalField()
-    high      = DecimalField()
-    low       = DecimalField()
-    close     = DecimalField()
-    volume    = BigIntegerField()
-
-    class Meta:
-        indexes = [models.Index(fields=['asset', '-timestamp'])]
-        unique_together = [['asset', 'timestamp']]
-
-# news/models.py
-class Article(Model):
-    url       = URLField(unique=True)         # deduplication key
-    headline  = CharField()
-    source    = CharField()
-    published_at = DateTimeField(db_index=True)
-    related_assets = ManyToManyField(Asset, blank=True)
-    sentiment_score = FloatField(null=True)   # Phase 2 — nullable for now
+```
+┌──────────────────────────────────────────────────────────┐
+│  FinTrack.app  (single bundled installer per OS)         │
+│                                                          │
+│  ┌───────────────────────────────────────────────────┐   │
+│  │  Tauri v2 shell (Rust, ~200 LOC)                  │   │
+│  │    - Spawns sidecar process on startup            │   │
+│  │    - Picks random free port, passes via env var   │   │
+│  │    - Waits for /api/health/ before showing window │   │
+│  │    - Exposes `get_sidecar_port()` Tauri command   │   │
+│  │    - Kills sidecar cleanly on app exit            │   │
+│  │    - Desktop notifications (Tauri plugin)         │   │
+│  │                                                   │   │
+│  │    ┌──────────────────────────────────────────┐   │   │
+│  │    │  React 18 UI (Vite build, inside webview)│   │   │
+│  │    │    - fetch() → http://127.0.0.1:<port>   │   │   │
+│  │    │    - Zustand global state                │   │   │
+│  │    │    - TradingView Lightweight Charts      │   │   │
+│  │    │    - Tailwind CSS                        │   │   │
+│  │    └──────────────────────────────────────────┘   │   │
+│  └───────────────────────────────────────────────────┘   │
+│                           ↑ HTTP (localhost only)         │
+│  ┌────────────────────────┴──────────────────────────┐   │
+│  │  Python sidecar (FastAPI + uvicorn)               │   │
+│  │    - Listens on 127.0.0.1:<random free port>      │   │
+│  │    - APScheduler in-process (no broker)           │   │
+│  │    - SQLAlchemy 2.x → SQLite (WAL mode)           │   │
+│  │    - Ingestion: yfinance, CoinGecko, FRED, RSS    │   │
+│  └────────────────────────┬──────────────────────────┘   │
+│                           ↓                              │
+│  ┌────────────────────────┴──────────────────────────┐   │
+│  │  SQLite file in OS app-data dir                   │   │
+│  │   Mac: ~/Library/Application Support/FinTrack/    │   │
+│  │   Win: %APPDATA%\FinTrack\                        │   │
+│  └───────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────┘
 ```
 
-### Cache
-- **Engine:** Upstash Redis (free: 256MB, 10k commands/day)
-- **URL format:** `rediss://...` (TLS — Upstash requires this)
-- **Used for:**
-  - Django cache framework (`CACHE_MIDDLEWARE_SECONDS = 30` for price endpoints)
-  - Celery broker and result backend
-  - Rate limiting (Sprint 2)
+---
 
-### Data Pipeline
-- **Location:** `data_pipeline/`
-- **Structure:**
-  ```
-  data_pipeline/
-  ├── ingestion/
-  │   ├── yfinance_fetcher.py    ← stocks, ETFs, crypto via yfinance
-  │   ├── coingecko_fetcher.py   ← crypto via CoinGecko REST API
-  │   ├── fred_fetcher.py        ← macro indicators via FRED API
-  │   └── rss_fetcher.py         ← news via Yahoo Finance RSS (feedparser)
-  └── processing/
-      ├── normaliser.py          ← standardise OHLCV data across sources
-      └── deduplicator.py        ← avoid re-inserting existing price points
-  ```
-- **Celery tasks** call fetchers → pass data to processing → bulk_create into Django ORM
+## Components
 
-### Frontend
-- **Framework:** React (Vite or Create React App)
-- **Location:** `frontend/`
-- **Production:** Vercel (free, auto-deploy from GitHub)
-- **Charts:** TradingView Lightweight Charts (free, MIT licence) or Recharts
+### Tauri v2 Shell
+
+- **Language:** Rust (minimal — config + sidecar process management)
+- **Location:** `shell/src-tauri/`
+- **Responsibilities:**
+  - Open app window, render webview, load React bundle
+  - Pick a random free port at startup (`TcpListener::bind(("127.0.0.1", 0))` → read assigned port → drop)
+  - Spawn the Python sidecar as a child process with `FINTRACK_PORT` env var
+  - Poll `/api/health/` with exponential backoff (max 10s) before showing the window
+  - Expose `get_sidecar_port()` Tauri command so the frontend can form API URLs
+  - Kill the sidecar cleanly on app exit (signal on Mac/Linux, `TerminateProcess` on Win)
+  - Register Tauri plugins: `notification` (alerts, Sprint 4), `updater` (Sprint 5)
+- **Bundled installers:** `.dmg` for Mac, `.msi` for Windows
+
+### React UI
+
+- **Framework:** React 18 + TypeScript + Vite
+- **Location:** `shell/src/`
 - **Styling:** Tailwind CSS
-- **State:** Zustand (lightweight, no boilerplate)
-- **API calls:** Axios or fetch — against Render.com Django backend URL
+- **State:** Zustand — one store per domain (`marketStore`, `newsStore`, `watchlistStore`, `settingsStore`)
+- **Charts:** TradingView Lightweight Charts (MIT, small bundle, performant)
+- **API client:** `shell/src/api/client.ts` — thin `fetch` wrapper that:
+  1. Calls `invoke<number>('get_sidecar_port')` on app boot
+  2. Caches the base URL `http://127.0.0.1:${port}`
+  3. Exposes `get`, `post`, `put`, `delete` helpers with `AbortController` support
+- **Build:** Vite outputs to `shell/dist/`, embedded by Tauri bundler
 
-### Infrastructure (local dev only)
-- **Docker Compose services:** `django`, `postgres`, `redis`
-- **Production:** No Docker on Render/Vercel — each platform builds natively
-- **Local start:** `docker compose up -d` starts postgres + redis; Django + Celery run locally
+### Python Sidecar
+
+- **Framework:** FastAPI + uvicorn
+- **Location:** `sidecar/`
+- **Entry point:** `sidecar/main.py` — reads `FINTRACK_PORT` env var, starts uvicorn on 127.0.0.1:port
+- **Binding:** 127.0.0.1 only (never 0.0.0.0) — not reachable off the local machine
+- **No authentication:** local-only, same-origin by process design. Still validate all inputs with Pydantic
+- **Layout:**
+  ```
+  sidecar/
+  ├── main.py                       ← uvicorn entrypoint
+  ├── config.py                     ← loads env vars, resolves DB path via platformdirs
+  ├── api/                          ← FastAPI route modules
+  │   ├── __init__.py               ← registers routers on the FastAPI app
+  │   ├── health.py
+  │   ├── assets.py
+  │   ├── prices.py
+  │   ├── news.py
+  │   ├── watchlist.py
+  │   └── alerts.py
+  ├── db/
+  │   ├── engine.py                 ← async engine + session factory, pragmas
+  │   ├── models.py                 ← SQLAlchemy ORM models
+  │   └── migrations/               ← Alembic migration scripts
+  ├── scheduler/
+  │   ├── __init__.py               ← creates BackgroundScheduler, starts on app startup
+  │   └── jobs.py                   ← ingest_prices, ingest_crypto, ingest_news, check_alerts
+  └── ingestion/
+      ├── yfinance_fetcher.py
+      ├── coingecko_fetcher.py
+      ├── fred_fetcher.py
+      └── rss_fetcher.py
+  ```
+
+### APScheduler
+
+- **Type:** `BackgroundScheduler` — runs in its own thread inside the sidecar
+- **Jobstore:** `SQLAlchemyJobStore` pointing at the same SQLite file → jobs persist across restarts
+- **Executor:** `ThreadPoolExecutor(max_workers=4)` — ingestion is I/O-bound, threads are fine
+- **Misfire grace:** 60s — on laptop sleep/wake, skip stale runs instead of queueing a backlog
+- **Lifecycle:** started in FastAPI `@app.on_event("startup")`, stopped in `@app.on_event("shutdown")`
+- **Jobs (Phase 1):**
+  - `ingest_prices` — every 5 min, batched yfinance `yf.download` for all active stock/ETF assets
+  - `ingest_crypto` — every 5 min, CoinGecko top 10
+  - `ingest_news` — every 15 min, Yahoo RSS for each watchlisted symbol (Sprint 4)
+  - `ingest_macro` — daily at 06:00 local, FRED indicators
+  - `check_price_alerts` — every 5 min (Sprint 4)
+  - `vacuum_db` — weekly, `VACUUM` + `ANALYZE`
+
+### SQLite + SQLAlchemy
+
+- **Engine:** SQLAlchemy 2.x (async for API endpoints, sync for scheduler jobs — separate session factories)
+- **File path (resolved via `platformdirs`):**
+  - Dev: `./fintrack.db` in repo root (gitignored)
+  - Prod Mac: `~/Library/Application Support/FinTrack/fintrack.db`
+  - Prod Win: `%APPDATA%\FinTrack\fintrack.db`
+- **Pragmas on every connection** (via SQLAlchemy `event.listens_for(engine, "connect")`):
+  - `journal_mode=WAL` — concurrent readers + scheduler writer
+  - `synchronous=NORMAL` — durable enough for single-user desktop
+  - `foreign_keys=ON`
+  - `busy_timeout=5000` — 5s wait before surfacing SQLITE_BUSY
+- **Migrations:** Alembic. Run automatically on sidecar startup — if DB version < head, migrate before accepting requests
+
+---
+
+## Data Model (Phase 1)
+
+```python
+# sidecar/db/models.py (sketch)
+
+class Asset(Base):
+    id         = Column(Integer, primary_key=True)
+    symbol     = Column(String, unique=True, index=True)     # "AAPL", "BTC-USD"
+    name       = Column(String)
+    asset_type = Column(Enum("stock","etf","crypto","commodity","index"))
+    exchange   = Column(String, nullable=True)
+    is_active  = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+
+class PricePoint(Base):
+    id        = Column(Integer, primary_key=True)
+    asset_id  = Column(ForeignKey("assets.id"), index=True)
+    timestamp = Column(DateTime, index=True)
+    open      = Column(Numeric(18,6))
+    high      = Column(Numeric(18,6))
+    low       = Column(Numeric(18,6))
+    close     = Column(Numeric(18,6))
+    volume    = Column(BigInteger)
+    __table_args__ = (
+        Index("ix_pricepoint_asset_ts", "asset_id", "timestamp"),
+        UniqueConstraint("asset_id", "timestamp"),
+    )
+
+class Article(Base):
+    id             = Column(Integer, primary_key=True)
+    url            = Column(String, unique=True)    # dedup key
+    headline       = Column(String)
+    source         = Column(String)
+    published_at   = Column(DateTime, index=True)
+    sentiment      = Column(Float, nullable=True)   # Phase 2 populates
+    related_assets = relationship("Asset", secondary=article_asset_table)
+
+class Watchlist(Base):
+    id    = Column(Integer, primary_key=True)
+    name  = Column(String)                          # user may create multiple
+    items = relationship("WatchlistItem", order_by="WatchlistItem.position")
+
+class WatchlistItem(Base):
+    id           = Column(Integer, primary_key=True)
+    watchlist_id = Column(ForeignKey("watchlists.id"))
+    asset_id     = Column(ForeignKey("assets.id"))
+    position     = Column(Integer)                  # for drag-reorder
+
+class PriceAlert(Base):
+    id           = Column(Integer, primary_key=True)
+    asset_id     = Column(ForeignKey("assets.id"))
+    threshold    = Column(Numeric(18,6))
+    direction    = Column(Enum("above","below"))
+    triggered    = Column(Boolean, default=False)
+    triggered_at = Column(DateTime, nullable=True)
+```
 
 ---
 
@@ -128,59 +218,86 @@ class Article(Model):
 
 ```
 yfinance / CoinGecko / FRED / Yahoo RSS
-           ↓  (Celery periodic tasks every 5–15 min)
-data_pipeline/ingestion/  →  data_pipeline/processing/
-           ↓  (Django ORM bulk_create)
-Neon PostgreSQL  ←→  Upstash Redis (hot cache, Celery broker)
+           ↓  (APScheduler jobs, 5–15 min cadence)
+sidecar/ingestion/*_fetcher.py  →  normalisation  →  bulk upsert
            ↓
-Django REST Framework API  (Render.com)
+SQLAlchemy ORM → SQLite (WAL mode)
            ↓
-React Frontend  (Vercel)
+FastAPI endpoints  (/api/prices/..., /api/news/..., /api/watchlist/..., /api/alerts/...)
+           ↓  HTTP (127.0.0.1:<port>)
+React UI in Tauri webview  →  Zustand stores  →  Lightweight Charts
            ↓
-User browser
+User sees live data
 ```
 
 ---
 
-## Free Tier Limits & Mitigation
+## Cross-Platform Considerations
 
-| Limit | Mitigation |
-|-------|-----------|
-| Neon 0.5GB storage | 90-day data retention, prune daily via Celery |
-| Upstash 10k cmds/day | Celery intervals ≥ 5 min, cache DRF responses 30s |
-| Render free service sleeps after 15min | Ping `/api/health/` every 10 min via cron-job.org (free) |
-| Render 1 free background worker | All Celery tasks share 1 worker — keep tasks short |
-| yfinance informal rate limits | `time.sleep(0.5)` between fetches, batch with `yf.download()` |
+| Concern | Mac | Windows | Linux (deferred) |
+|---------|-----|---------|------------------|
+| App-data dir | `~/Library/Application Support/FinTrack/` | `%APPDATA%\FinTrack\` | `~/.local/share/fintrack/` |
+| Installer | `.dmg` (Tauri bundler) | `.msi` (WiX via Tauri) | `.AppImage` + `.deb` |
+| Code signing | Apple Developer ID + notarisation required | EV cert OR Azure Trusted Signing | Not typically required |
+| Python bundling | PyInstaller → Mach-O inside `.app` | PyInstaller → `.exe` inside Tauri bundle | PyInstaller → ELF |
+| Sidecar spawn | `Command::new("fintrack-sidecar")` from `resources/` | Same, `.exe` extension in prod | Same |
+| Native notifications | `osascript`-backed (Tauri plugin) | Windows Action Center (Tauri plugin) | libnotify (Tauri plugin) |
+
+All path handling uses `pathlib.Path` (Python) and Tauri `path` API (Rust) — no hardcoded separators anywhere.
 
 ---
 
-## Phase 2 ML (future — do not start in Phase 1)
+## Phase 2 — Local ML (future — do not start in Phase 1)
 
-- Sentiment analysis on `Article.headline` using FinBERT or VADER
-- LSTM / Prophet price prediction on `PricePoint` history
-- Separate ML service or integrated Django management command
-- `requirements-ml.txt` — install only when Phase 2 begins
-- `ml_models/training/` — training pipelines, model artefacts
+- **Sentiment:** VADER — lightweight, CPU-only, lives inside sidecar, writes to `Article.sentiment`
+- **Price forecasting:** Prophet or small LSTM, trained locally on user's `PricePoint` history
+- **Inference:** Models exported to ONNX, loaded in sidecar via `onnxruntime`
+- **Training pipeline:** `ml/train.py` runnable on demand from Settings UI — user controls when retraining happens
+- **Dependencies isolated:** `requirements-ml.txt` installed only when Phase 2 begins
+- **No cloud inference:** everything runs on-device. User's data never leaves their machine
+
+---
+
+## What's Explicitly NOT in the Architecture
+
+The following were in the original web-app plan (see DECISIONS.md DEC-001–DEC-006) and
+are **deliberately excluded** under the desktop architecture:
+
+- Django, Django REST Framework, Django admin
+- Celery, Redis, any message broker
+- PostgreSQL, Neon, any cloud database
+- Render.com, Vercel, Upstash, any hosting provider
+- TimescaleDB
+- JWT authentication, OAuth, any auth system (single-user local)
+- Rate limiting (sidecar binds to 127.0.0.1; single-user, no abuse vector)
+- Wildcard CORS — CORS middleware *is* enabled, but with a fixed allowlist covering only the dev Vite origin (`http://localhost:1420`) and the prod webview origins (`tauri://localhost`, `https://tauri.localhost`). Required because the webview is cross-origin to the sidecar
+- Docker Compose for services (no services to compose)
+- Kubernetes, Terraform, nginx
+- cron-job.org ping (no sleeping service to keep alive)
+- Email alerts via SMTP (replaced by desktop notifications)
+- TensorFlow, PyTorch in Phase 1 (Phase 2 uses ONNX for inference only)
+- MLflow, Weights & Biases, Feast (heavy cloud-ops tools not needed for single-user local ML)
+
+If any of these resurface in a suggestion or memory recall, check this list first and
+challenge before acting.
 
 ---
 
 ## Environment Variables Reference
 
 ```bash
-# Django
-SECRET_KEY=...
-DEBUG=False                         # True in dev only
-ALLOWED_HOSTS=...                   # Render domain in prod
-DATABASE_URL=postgresql://...       # Neon connection string
-REDIS_URL=rediss://...              # Upstash TLS Redis URL
+# Injected by Tauri shell into sidecar at runtime
+FINTRACK_PORT=54321                 # random free port picked by shell at startup
 
-# CORS (prod only)
-CORS_ALLOWED_ORIGINS=https://your-app.vercel.app
+# Dev / runtime overrides
+FINTRACK_DB_PATH=./fintrack.db      # override DB path (tests use this)
+FINTRACK_EXTERNAL_SIDECAR=1         # dev only — shell won't spawn; use port 8765
+LOG_LEVEL=INFO                      # DEBUG in dev
 
-# Data sources
-FRED_API_KEY=...                    # free at fred.stlouisfed.org
-
-# Celery (same Redis URL)
-CELERY_BROKER_URL=${REDIS_URL}
-CELERY_RESULT_BACKEND=${REDIS_URL}
+# External data sources
+FRED_API_KEY=                       # free key from fred.stlouisfed.org
 ```
+
+No `.env` ships with the app. User-configurable runtime settings (refresh intervals,
+which data sources are enabled, etc.) live in the SQLite DB and are edited via the
+Settings UI (Sprint 3).
