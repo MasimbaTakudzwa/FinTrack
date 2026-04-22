@@ -12,9 +12,9 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-22 — Session 003 (checkpoint 6 — Sprint 3 milestones 3A–3E landed)
-**Active sprint:** Sprint 3 — React UI Dashboard (3F next — final)
-**Overall status:** 🟢 Sprints 1 & 2 complete; Sprint 3 5/6 milestones complete — dashboard, asset detail chart, market overview all live
+**Last updated:** 2026-04-22 — Session 003 (checkpoint 7 — Sprint 3 complete via 3F full-path)
+**Active sprint:** Sprint 3 — React UI Dashboard (complete; Sprint 4 next)
+**Overall status:** 🟢 Sprints 1, 2 & 3 complete — dashboard, asset detail chart, market overview, and a full mutable-settings stack (DB-backed config + scheduler reconfigure + Settings UI)
 
 ### What was just completed (Sprint 2 first pass)
 - **PricePoint model + migration**: `sidecar/db/models.py` — `PricePoint` with FK to `assets`, `Numeric(18,6)` for o/h/l/c, `BigInteger` volume, composite index `ix_price_points_asset_ts` on `(asset_id, timestamp)`, unique constraint `uq_price_points_asset_ts` for dedup. Alembic migration `0002_create_price_points.py` — runs cleanly on top of 0001. Asset ↔ PricePoint relationship wired with `cascade="all, delete-orphan"`
@@ -44,17 +44,18 @@
 - **3C — Dashboard (`e3fd661`)**: Parallel fan-out — `listAssets()` then `Promise.all` of `getPriceSeries(symbol, { limit: 60 })`. `AssetCard` shows symbol + name + asset-type pill, last close (tabular-nums), day change % vs previous close with colour-coded arrow, and a 60-bar inline-SVG `Sparkline`. Empty/error states rendered distinctly; Refresh button re-runs the whole pass. Card links to `/assets/:symbol` so 3D slots in without plumbing changes. Bumped tsconfig `target`/`lib` to ES2022 for `Array.prototype.at`.
 - **3D — Asset detail (`1915c35`)**: `AssetDetail` fetches asset (find by symbol in `listAssets({ activeOnly: false })`) and 500 bars in parallel. Unknown-symbol, load-error, empty-bars, and loaded states all rendered. `CandleChart` wraps `lightweight-charts@5.1.0` via `createChart` + `chart.addSeries(CandlestickSeries)` + histogram for volume on an inset price scale. Theme palette switches between light/dark based on `useResolvedTheme()`. `PricePanel` shows OHLC + volume grid. News sidebar is a placeholder pointing at Sprint 4.
 - **3E — Market overview (`da225d6`)**: Top 5 gainers + top 5 losers ranked by day-change %, each row linking to `/assets/:symbol`. "By asset type" breakdown counts stock/etf/crypto/commodity/index. Minimal payload — `getPriceSeries(symbol, { limit: 2 })` for each asset since we only need the last two closes. Sector heatmap deferred (Asset model carries no sector field).
+- **3F — Settings (full path)**: Full mutable runtime-settings stack.
+  - **DB layer**: new `settings(key PK, value TEXT, updated_at)` table via Alembic `0004_create_settings.py`; `Setting` SQLAlchemy model.
+  - **Service layer** (`sidecar/services/settings.py`): `SETTINGS_SPECS` declares 5 mutable keys — `ingest_prices.interval_minutes` (int, 1–1440), `ingest_crypto.enabled` (bool), `ingest_crypto.interval_minutes` (int, 1–1440), `ingest_macro.cron_hour_utc` (int, 0–23), `fred_api_key` (secret). Each spec carries type, env_attr, default, min/max, label, description. `load_effective_config()` merges **DB > env > default**. `validate_and_serialize()` type-checks + bounds-checks; `apply_updates()` is atomic (validates all before any write); empty-string for SECRET type deletes the DB row (reverts to env/default).
+  - **API**: `GET /api/config/` returns `{settings: [...with source/env_name/min/max/has_value/masked-secret...], readonly: {db_path, port, log_level, enable_scheduler, enable_seed}}`. `PUT /api/config/` takes `{updates: {key: value}}`, 422s on validation failure (atomic — no partial writes), then calls `scheduler.reconfigure()` best-effort.
+  - **Scheduler refactor**: `_register_jobs(scheduler, config)` takes an effective-config dict instead of reading `sidecar.config.settings` directly. New `reconfigure()` uses the module-level scheduler lock and re-runs `_register_jobs` with fresh effective config — APScheduler `add_job(replace_existing=True)` updates intervals in place, `remove_job` (wrapped in `suppress(JobLookupError)`) drops disabled jobs. `ingest_macro` job reads `fred_api_key` from effective config on each invocation so runtime key changes take effect without restart.
+  - **Shell/UI**: `apiPut<T,B>` helper with JSON-body error-detail extraction. `getConfig()`, `putConfig()` in `shell/src/api/client.ts`. `Settings.tsx` rewrite: theme radio (system/light/dark, client-only, bound to `useSettings`), backend settings list (bool → toggle, int → number input w/ min/max, secret → password field + conditional Clear button, colour-coded source badge — zinc default / indigo env / emerald db), read-only runtime info panel, sticky dirty-state save bar with revert. Dirty detection via `collectDirty()` — `null` = untouched, `""` on a secret with stored value = intent to clear.
+  - **Tests**: `test_migrations.py` adds settings-table check; `test_settings_service.py` covers precedence (default/env/db), int bounds, bool string parsing, atomic failure, secret clear, `reset_to_default`; `test_api_config.py` covers GET shape, masked secret, PUT int/bool/secret, 422 validation, empty-secret clearing, atomic failure; `test_scheduler_reconfigure.py` spins up a real `BackgroundScheduler` in `paused` mode (jobs actually persist to jobstore) — covers add, enable-toggle add/remove, in-place interval update, cron-hour change, reconfigure on non-running scheduler returns False, reconfigure after service `apply_updates` picks up new values.
+  - **Verifications**: `pytest` 80/80 green, `ruff check .` clean, `mypy --strict sidecar/` clean on 28 files, `pnpm lint` clean, `pnpm build` clean (437 kB JS / 138 kB gzipped).
 
 ### What to work on NEXT (in order)
-1. [x] ~~Sprint 2 follow-ups~~ — landed as `afe3170`
-2. **Sprint 3 — React UI Dashboard** (5 of 6 milestones complete)
-   - [x] 3A — Plumbing: Tailwind + Zustand + typed API client (`df1c30e`)
-   - [x] 3B — App shell: sidebar/header/router/theme toggle (`5d570ac`)
-   - [x] 3C — Dashboard watchlist grid (`e3fd661`)
-   - [x] 3D — Asset detail with Lightweight Charts (`1915c35`)
-   - [x] 3E — Market overview (top movers + type counts) (`da225d6`)
-   - [ ] 3F — Settings page: theme selector (client), data-source toggles + refresh intervals + DB path. Note: mutable server settings will require a new `settings` table + `/api/config/` GET/PUT endpoints or `.env` override mechanism — scope decision pending. Read-only display of current env config is the minimum viable path.
-3. [ ] **Live GUI verification** — run `pnpm tauri dev` to confirm shell → sidecar round-trip still works with the new UI. Smoke test Dashboard → AssetCard click → AssetDetail candle chart, refresh, theme toggle, and nav-link active states.
+1. [ ] **Live GUI verification** — run `pnpm tauri dev` to smoke-test the full Sprint 3 surface: Dashboard → AssetCard click → AssetDetail candle chart, Refresh, theme toggle (system/light/dark), nav-link active states, Market overview links, Settings page (load, change an int, save, observe source badge flip to `db`, clear it, revert to `env`, change theme).
+2. [ ] **Sprint 4 — News, Watchlists & Desktop Alerts** — next sprint. See SPRINT BACKLOG for tasks.
 
 ### Active blockers
 - None
@@ -75,6 +76,9 @@
 - **Dev DB path heuristic**: when CWD has `pyproject.toml` + `sidecar/`, DB is `./fintrack.db` (gitignored); otherwise `platformdirs.user_data_dir("FinTrack","FinTrack")`
 - **Tauri v2 template split**: entry is `src-tauri/src/lib.rs`, not `main.rs`
 - **ESLint flat config gotcha**: use `reactHooks.configs.flat["recommended-latest"]`, and `pnpm -C <dir>` (not `--prefix` which is npm-only)
+- **APScheduler `replace_existing` needs a started scheduler**: on an unstarted BackgroundScheduler, `add_job` stages jobs in a pending list and `get_job` reads from the jobstore — so `add_job(replace_existing=True)` appears to no-op when verifying in tests. Fix: call `scheduler.start(paused=True)` in the test fixture so jobs flush to the jobstore without the worker thread firing. Production code is unaffected (always calls `start()`).
+- **Settings precedence rule**: DB row > env var > hardcoded default. Set via env vars you want pinned for dev/tests/CI; once a user writes via the UI, the DB row takes over. `FINTRACK_ENABLE_SCHEDULER`/`FINTRACK_ENABLE_SEED` deliberately stay env-only (kill switches), as do `FINTRACK_PORT`/`FINTRACK_DB_PATH`/`LOG_LEVEL` (runtime-required or restart-required).
+- **`ingest_macro` reads FRED key lazily**: job calls `load_effective_config()` on each invocation so `/api/config/` updates take effect without a sidecar restart. The scheduler's add-or-remove decision for the macro job itself also uses effective config (via `_register_jobs`).
 - Phase 1 dev runs unsigned binaries — code signing deferred to Sprint 5
 - SQLite WAL mode mandatory — scheduler writes concurrently with UI reads
 - Sidecar never binds to 0.0.0.0 — always 127.0.0.1
@@ -173,7 +177,7 @@
 - [x] Dashboard page: watchlist grid with sparkline + day change % (3C — `e3fd661`)
 - [x] Asset detail page: full OHLCV chart (TradingView Lightweight Charts), recent news placeholder (3D — `1915c35`)
 - [x] Market overview: top movers, asset-type counts (sector heatmap deferred — no sector field on Asset) (3E — `da225d6`)
-- [ ] Settings page: data source toggles, refresh intervals, clear cache, DB file path (3F)
+- [x] Settings page: theme selector (client), data-source toggles, refresh intervals, FRED key, read-only runtime info; full backend w/ settings table + /api/config GET/PUT + scheduler reconfigure (3F)
 
 ---
 

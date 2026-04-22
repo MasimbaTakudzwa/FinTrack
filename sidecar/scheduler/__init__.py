@@ -3,8 +3,10 @@ from __future__ import annotations
 import contextlib
 import logging
 from threading import Lock
+from typing import Any
 
 from apscheduler.executors.pool import ThreadPoolExecutor
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -12,6 +14,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from sidecar.config import settings
 from sidecar.scheduler.jobs import ingest_crypto, ingest_macro, ingest_prices
+from sidecar.services.settings import load_effective_config
 
 logger = logging.getLogger(__name__)
 
@@ -35,36 +38,47 @@ def _build_scheduler(db_path: str) -> BackgroundScheduler:
     )
 
 
-def _register_jobs(scheduler: BackgroundScheduler) -> None:
+def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> None:
+    """Add / update / remove jobs to match `config`.
+
+    `replace_existing=True` upserts in the persistent jobstore; missing jobs
+    are removed via `remove_job` (wrapped in suppress to tolerate a not-yet-
+    seeded jobstore on first start).
+    """
     scheduler.add_job(
         ingest_prices,
-        trigger=IntervalTrigger(minutes=settings.ingest_prices_interval_minutes),
+        trigger=IntervalTrigger(minutes=int(config["ingest_prices.interval_minutes"])),
         id="ingest_prices",
         name="Ingest OHLCV prices from yfinance",
         replace_existing=True,
     )
-    if settings.enable_crypto_job:
+
+    if bool(config["ingest_crypto.enabled"]):
         scheduler.add_job(
             ingest_crypto,
-            trigger=IntervalTrigger(minutes=settings.ingest_crypto_interval_minutes),
+            trigger=IntervalTrigger(
+                minutes=int(config["ingest_crypto.interval_minutes"])
+            ),
             id="ingest_crypto",
             name="Ingest OHLC crypto prices from CoinGecko",
             replace_existing=True,
         )
     else:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(JobLookupError):
             scheduler.remove_job("ingest_crypto")
 
-    if settings.fred_api_key:
+    if config.get("fred_api_key"):
         scheduler.add_job(
             ingest_macro,
-            trigger=CronTrigger(hour=settings.ingest_macro_cron_hour, minute=0),
+            trigger=CronTrigger(
+                hour=int(config["ingest_macro.cron_hour_utc"]), minute=0
+            ),
             id="ingest_macro",
             name="Ingest macro observations from FRED",
             replace_existing=True,
         )
     else:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(JobLookupError):
             scheduler.remove_job("ingest_macro")
 
 
@@ -78,7 +92,7 @@ def start() -> BackgroundScheduler | None:
             return None
         db_path = settings.resolved_db_path()
         scheduler = _build_scheduler(db_path)
-        _register_jobs(scheduler)
+        _register_jobs(scheduler, load_effective_config())
         scheduler.start()
         logger.info("Scheduler started (jobstore=%s)", db_path)
         _scheduler = scheduler
@@ -95,6 +109,21 @@ def shutdown(wait: bool = False) -> None:
             logger.info("Scheduler stopped")
         finally:
             _scheduler = None
+
+
+def reconfigure() -> bool:
+    """Re-register jobs against the current effective config.
+
+    Returns True if the running scheduler was updated; False if no scheduler
+    is running (in which case the next `start()` will pick up the new config
+    automatically).
+    """
+    with _lock:
+        if _scheduler is None:
+            return False
+        _register_jobs(_scheduler, load_effective_config())
+        logger.info("Scheduler jobs reconfigured from effective config")
+        return True
 
 
 def get_scheduler() -> BackgroundScheduler | None:

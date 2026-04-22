@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy import Enum as SQLEnum
@@ -110,4 +111,22 @@ class MacroDataPoint(Base):
     __table_args__ = (
         UniqueConstraint("indicator_id", "date", name="uq_macro_data_points_ind_date"),
         Index("ix_macro_data_points_ind_date", "indicator_id", "date"),
+    )
+
+
+class Setting(Base):
+    """Key-value runtime settings persisted in SQLite.
+
+    Effective config precedence: DB value (this table) > env var > hardcoded default.
+    See sidecar.services.settings for the list of known keys and their types.
+    """
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )

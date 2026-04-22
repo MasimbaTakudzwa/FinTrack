@@ -52,6 +52,32 @@ async function apiGet<T>(
   return (await res.json()) as T;
 }
 
+async function apiPut<T, B>(
+  path: string,
+  body: B,
+  opts: { signal?: AbortSignal } = {},
+): Promise<T> {
+  const base = await getBaseUrl();
+  const url = `${base}${path}`;
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: opts.signal,
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { detail?: unknown };
+      if (typeof body.detail === "string") detail = body.detail;
+    } catch {
+      // non-JSON response
+    }
+    throw new ApiError(res.status, url, `PUT ${path} → ${detail}`);
+  }
+  return (await res.json()) as T;
+}
+
 // ---------- Health ----------
 
 export interface HealthResponse {
@@ -175,4 +201,55 @@ export function getMacroSeries(
     },
     signal: opts.signal,
   });
+}
+
+// ---------- Config / runtime settings ----------
+
+export type SettingType = "bool" | "int" | "string" | "secret";
+export type SettingSource = "default" | "env" | "db";
+
+export interface SettingEntry {
+  key: string;
+  type: SettingType;
+  label: string;
+  description: string;
+  /** Current value. `null` for secrets (value is never returned verbatim). */
+  value: number | boolean | string | null;
+  source: SettingSource;
+  /** Matching env var name (`FINTRACK_...`) or null if no env fallback. */
+  env_name: string | null;
+  min: number | null;
+  max: number | null;
+  /** For secrets: whether any value is set (env or db). Always true otherwise. */
+  has_value: boolean;
+}
+
+export interface ReadonlyConfig {
+  db_path: string;
+  port: number;
+  log_level: string;
+  enable_scheduler: boolean;
+  enable_seed: boolean;
+}
+
+export interface AppConfig {
+  settings: SettingEntry[];
+  readonly: ReadonlyConfig;
+}
+
+export type ConfigUpdateValue = number | boolean | string;
+
+export function getConfig(signal?: AbortSignal): Promise<AppConfig> {
+  return apiGet<AppConfig>("/api/config/", { signal });
+}
+
+export function putConfig(
+  updates: Record<string, ConfigUpdateValue>,
+  signal?: AbortSignal,
+): Promise<AppConfig> {
+  return apiPut<AppConfig, { updates: Record<string, ConfigUpdateValue> }>(
+    "/api/config/",
+    { updates },
+    { signal },
+  );
 }

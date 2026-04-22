@@ -54,6 +54,31 @@ def test_upgrade_to_head_creates_price_points_table(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_upgrade_to_head_creates_settings_table(tmp_path: Path) -> None:
+    db_file = tmp_path / "test.db"
+    upgrade_to_head(db_path=str(db_file))
+
+    conn = sqlite3.connect(db_file)
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='settings'"
+        ).fetchone()
+        assert row is not None, "settings table not created"
+
+        columns = {
+            r[1] for r in conn.execute("PRAGMA table_info(settings)").fetchall()
+        }
+        expected = {"key", "value", "updated_at"}
+        assert expected <= columns, f"missing columns: {expected - columns}"
+
+        pk_columns = [
+            r[1] for r in conn.execute("PRAGMA table_info(settings)").fetchall() if r[5]
+        ]
+        assert pk_columns == ["key"], "settings primary key should be 'key'"
+    finally:
+        conn.close()
+
+
 def test_upgrade_to_head_creates_macro_tables(tmp_path: Path) -> None:
     db_file = tmp_path / "test.db"
     upgrade_to_head(db_path=str(db_file))

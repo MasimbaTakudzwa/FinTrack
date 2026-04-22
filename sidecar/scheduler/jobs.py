@@ -8,12 +8,12 @@ from sqlalchemy import CursorResult, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from sidecar.config import settings
 from sidecar.db.engine import session_scope
 from sidecar.db.models import Asset, AssetType, MacroDataPoint, MacroIndicator, PricePoint
 from sidecar.ingestion.coingecko_fetcher import fetch_crypto_prices
 from sidecar.ingestion.fred_fetcher import fetch_macro_series_many
 from sidecar.ingestion.yfinance_fetcher import FetcherError, PriceBar, fetch_prices
+from sidecar.services.settings import load_effective_config
 
 logger = logging.getLogger(__name__)
 
@@ -136,9 +136,12 @@ def ingest_crypto() -> int:
 def ingest_macro() -> int:
     """Fetch observations for every active macro indicator from FRED.
 
-    Requires `FINTRACK_FRED_API_KEY` to be set — otherwise the job is a no-op.
+    Requires the `fred_api_key` setting (or `FINTRACK_FRED_API_KEY` env var)
+    to be set — otherwise the job is a no-op. Read lazily on each invocation
+    so runtime updates via the settings API take effect without a restart.
     """
-    api_key = settings.fred_api_key
+    config = load_effective_config()
+    api_key = config.get("fred_api_key") or ""
     if not api_key:
         logger.info("ingest_macro: FRED_API_KEY not set, skipping")
         return 0
