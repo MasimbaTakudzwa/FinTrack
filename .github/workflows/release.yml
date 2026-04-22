@@ -1,0 +1,286 @@
+# .github/workflows/release.yml
+#
+# Release pipeline. Triggered by pushing a tag that matches `v*` (e.g. v0.1.0),
+# or manually via workflow_dispatch. Produces:
+#
+#   macos-latest  →  FinTrack_<version>_aarch64.dmg      (Apple Silicon)
+#                    FinTrack.app.tar.gz                  (raw .app, updater feed)
+#   windows-latest →  FinTrack_<version>_x64_en-US.msi   (WiX)
+#                    FinTrack_<version>_x64-setup.exe    (NSIS, Tauri default)
+#
+# Each runner:
+#   1. Checks out source
+#   2. Installs Python 3.13 + the sidecar's runtime deps + PyInstaller
+#   3. Runs `pyinstaller sidecar.spec --clean --noconfirm` → dist/fintrack-sidecar/
+#   4. Installs pnpm + Node 22 + JS deps
+#   5. Runs `pnpm tauri build` which:
+#      - Compiles the Rust shell in release mode
+#      - Copies `dist/fintrack-sidecar/` into the app bundle as a resource
+#      - Produces signed+notarised .dmg (mac) / .msi (win) when secrets exist
+#   6. Uploads the bundle artifacts to the workflow run
+#   7. (When a release already exists for the tag) attaches artifacts to it
+#
+# Signing secrets are OPTIONAL — the workflow produces unsigned builds when
+# they're unset, and logs a warning. When the Apple Developer account and
+# Windows cert are in hand, add the secrets listed below and re-trigger.
+#
+# Required secrets for signed mac builds:
+#   APPLE_CERTIFICATE            base64-encoded .p12 (Developer ID Application)
+#   APPLE_CERTIFICATE_PASSWORD   cert password
+#   APPLE_SIGNING_IDENTITY       e.g. "Developer ID Application: Jane Doe (TEAMID)"
+#   APPLE_ID                     notarytool Apple ID
+#   APPLE_PASSWORD               app-specific password
+#   APPLE_TEAM_ID                10-char team ID
+#
+# Required secrets for signed win builds (once EV cert / Azure Trusted Signing is acquired):
+#   WINDOWS_CERTIFICATE          base64-encoded .pfx
+#   WINDOWS_CERTIFICATE_PASSWORD cert password
+#
+# Optional secret for Tauri updater (Sprint 5 final step):
+#   TAURI_SIGNING_PRIVATE_KEY          updater keypair
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD optional password for the updater key
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Tag to build (leave empty for HEAD)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS (aarch64)
+            # Tauri will pick up aarch64-apple-darwin from the runner host
+          - os: windows-latest
+            name: Windows (x64)
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-packaging.txt
+
+      - name: Install sidecar + packaging deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-packaging.txt
+
+      - name: Freeze sidecar with PyInstaller
+        run: pyinstaller sidecar.spec --clean --noconfirm
+
+      - name: Verify frozen binary exists (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          test -x dist/fintrack-sidecar/fintrack-sidecar
+          ls -lah dist/fintrack-sidecar/
+
+      - name: Verify frozen binary exists (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/fintrack-sidecar/fintrack-sidecar.exe")) {
+            throw "fintrack-sidecar.exe missing from PyInstaller output"
+          }
+          Get-ChildItem dist/fintrack-sidecar/
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: shell/pnpm-lock.yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Import the Apple Developer ID cert into a dedicated, ephemeral keychain
+      # so Tauri's bundler can sign the .app + .dmg. Only runs when the cert
+      # secret is present — unsigned builds are fine for pre-v0.1.0 smoke runs.
+      - name: Import Apple signing certificate
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Make this keychain the default so codesign finds the identity.
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed -e s/\"//g | tr '\n' ' ')
+          security default-keychain -s "$KEYCHAIN_PATH"
+
+          rm -f "$CERT_PATH"
+
+      # Import the Windows signing cert into the runner's cert store so
+      # signtool (invoked by Tauri's bundler when configured) can find it.
+      # Only runs when the cert secret is present. Once EV cert / Azure
+      # Trusted Signing is acquired, set `bundle.windows.certificateThumbprint`
+      # in tauri.conf.json to the thumbprint printed by this step.
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $secPwd = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $secPwd
+          Write-Host "Imported certificate with thumbprint: $($cert.Thumbprint)"
+          Remove-Item $pfxPath
+
+      - name: Cache Cargo registry + git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            shell/src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('shell/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Install JS deps
+        run: pnpm -C shell install --frozen-lockfile
+
+      # When TAURI_SIGNING_PRIVATE_KEY is unset, Tauri's bundler hard-fails at
+      # the updater-signing step because `createUpdaterArtifacts: true` is set
+      # in tauri.conf.json. Override the config to disable updater artifacts
+      # for unsigned builds (first release, or any build cut before the
+      # updater key has been generated + added as a secret).
+      - name: Build Tauri app
+        env:
+          # --- macOS signing + notarisation (no-ops when unset) ---
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # --- Windows signing (no-ops when unset) ---
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          # --- Tauri updater signing ---
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY set — building with updater artifacts."
+            pnpm -C shell tauri build
+          else
+            echo "TAURI_SIGNING_PRIVATE_KEY unset — disabling updater artifacts for this build."
+            pnpm -C shell tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          fi
+
+      # Primary installer artifacts — required (fail the job if missing).
+      - name: Upload macOS installer
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fintrack-macos-installer
+          path: shell/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Windows installer
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fintrack-windows-installer
+          path: |
+            shell/src-tauri/target/release/bundle/msi/*.msi
+            shell/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      # Updater artifacts — optional (only exist when TAURI_SIGNING_PRIVATE_KEY
+      # is set). `if-no-files-found: warn` so a missing key doesn't fail CI.
+      - name: Upload macOS updater bundle
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fintrack-macos-updater
+          path: |
+            shell/src-tauri/target/release/bundle/macos/*.app.tar.gz
+            shell/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload Windows updater bundle
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fintrack-windows-updater
+          path: |
+            shell/src-tauri/target/release/bundle/msi/*.msi.zip
+            shell/src-tauri/target/release/bundle/msi/*.msi.zip.sig
+            shell/src-tauri/target/release/bundle/nsis/*-setup.exe.zip
+            shell/src-tauri/target/release/bundle/nsis/*-setup.exe.zip.sig
+          if-no-files-found: warn
+          retention-days: 30
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: ls -lahR artifacts/
+
+      - name: Create / update draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: |
+            artifacts/fintrack-macos/**/*
+            artifacts/fintrack-windows/**/*

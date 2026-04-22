@@ -35,6 +35,15 @@
     ],
     "resources": [
       "../../dist/fintrack-sidecar"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/MasimbaTakudzwa/FinTrack/releases/latest/download/latest.json"
+      ],
+      "pubkey": ""
+    }
   }
 }
