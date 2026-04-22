@@ -26,10 +26,12 @@ class Settings(BaseSettings):
     enable_seed: bool = True
     enable_crypto_job: bool = False
     enable_news_job: bool = True
+    enable_alerts_job: bool = True
     ingest_prices_interval_minutes: int = 5
     ingest_crypto_interval_minutes: int = 15
     ingest_news_interval_minutes: int = 15
     ingest_macro_cron_hour: int = 6
+    check_alerts_interval_minutes: int = 1
 
     def resolved_db_path(self) -> str:
         return self.db_path or _default_db_path()

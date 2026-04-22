@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./layout/AppShell";
+import { Alerts } from "./pages/Alerts";
 import { AssetDetail } from "./pages/AssetDetail";
 import { Dashboard } from "./pages/Dashboard";
 import { Macro } from "./pages/Macro";
@@ -32,6 +33,7 @@ function App() {
           <Route path="news" element={<News />} />
           <Route path="watchlists" element={<Watchlists />} />
           <Route path="macro" element={<Macro />} />
+          <Route path="alerts" element={<Alerts />} />
           <Route path="settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

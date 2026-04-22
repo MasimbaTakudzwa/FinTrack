@@ -1,5 +1,6 @@
 import {
   Activity,
+  Bell,
   LineChart,
   Newspaper,
   Settings as SettingsIcon,
@@ -21,6 +22,7 @@ const ITEMS: NavItem[] = [
   { to: "/market", label: "Market", icon: TrendingUp },
   { to: "/news", label: "News", icon: Newspaper },
   { to: "/macro", label: "Macro", icon: Activity },
+  { to: "/alerts", label: "Alerts", icon: Bell },
   { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];
 

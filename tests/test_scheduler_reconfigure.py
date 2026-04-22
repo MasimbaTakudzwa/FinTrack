@@ -41,6 +41,8 @@ DEFAULT_CONFIG = {
     "ingest_news.interval_minutes": 15,
     "ingest_macro.cron_hour_utc": 6,
     "fred_api_key": "",
+    "check_alerts.enabled": True,
+    "check_alerts.interval_minutes": 1,
 }
 
 
@@ -74,6 +76,27 @@ def test_register_jobs_removes_disabled_news(
         paused_scheduler, dict(DEFAULT_CONFIG, **{"ingest_news.enabled": False})
     )
     assert paused_scheduler.get_job("ingest_news") is None
+
+
+def test_register_jobs_adds_check_alerts_by_default(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    job = paused_scheduler.get_job("check_price_alerts")
+    assert job is not None
+    assert job.trigger.interval.total_seconds() == 60
+
+
+def test_register_jobs_removes_disabled_check_alerts(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    assert paused_scheduler.get_job("check_price_alerts") is not None
+
+    _register_jobs(
+        paused_scheduler, dict(DEFAULT_CONFIG, **{"check_alerts.enabled": False})
+    )
+    assert paused_scheduler.get_job("check_price_alerts") is None
 
 
 def test_register_jobs_adds_crypto_when_enabled(
@@ -152,7 +175,12 @@ def test_register_jobs_fires_interval_jobs_immediately_on_first_register(
     after = datetime.now(UTC)
 
     window = (before - timedelta(seconds=1), after + timedelta(seconds=1))
-    for job_id in ("ingest_prices", "ingest_crypto", "ingest_news"):
+    for job_id in (
+        "ingest_prices",
+        "ingest_crypto",
+        "ingest_news",
+        "check_price_alerts",
+    ):
         job = paused_scheduler.get_job(job_id)
         assert job is not None and job.next_run_time is not None
         assert window[0] <= job.next_run_time <= window[1], (

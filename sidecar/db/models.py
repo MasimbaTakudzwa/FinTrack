@@ -30,6 +30,11 @@ class AssetType(StrEnum):
     INDEX = "index"
 
 
+class AlertDirection(StrEnum):
+    ABOVE = "above"
+    BELOW = "below"
+
+
 class Asset(Base):
     __tablename__ = "assets"
 
@@ -206,6 +211,51 @@ class WatchlistItem(Base):
             "watchlist_id", "asset_id", name="uq_watchlist_items_list_asset"
         ),
     )
+
+
+class PriceAlert(Base):
+    """A user-configured threshold crossing alert for a single asset.
+
+    Semantics are one-shot: when the scheduler detects a crossing it stamps
+    ``triggered_at`` (and the alert stops re-firing). The shell polls for rows
+    with ``triggered_at IS NOT NULL AND notified_at IS NULL``, fires a native
+    desktop notification, then calls the mark-notified endpoint to set
+    ``notified_at`` — this is resilient across shell restarts since the
+    polling snapshot is always based on persisted state. To re-arm, the user
+    toggles via the UI which clears both timestamps.
+
+    ``is_active`` lets the user pause an alert without deleting it (e.g. to
+    avoid noise during earnings) while preserving its config.
+    """
+
+    __tablename__ = "price_alerts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE"), index=True
+    )
+    threshold: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    direction: Mapped[AlertDirection] = mapped_column(
+        SQLEnum(
+            AlertDirection,
+            name="alert_direction_enum",
+            values_callable=lambda e: [m.value for m in e],
+        )
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    triggered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    note: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+
+    asset: Mapped[Asset] = relationship()
 
 
 class Setting(Base):

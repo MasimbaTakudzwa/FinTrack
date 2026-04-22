@@ -438,3 +438,104 @@ export function reorderWatchlistItems(
     { signal },
   );
 }
+
+// ---------- Price Alerts ----------
+
+export type AlertDirection = "above" | "below";
+
+export interface PriceAlert {
+  id: number;
+  asset_id: number;
+  symbol: string;
+  asset_name: string;
+  threshold: string; // Decimal-as-string
+  direction: AlertDirection;
+  is_active: boolean;
+  triggered_at: string | null; // ISO 8601 or null
+  notified_at: string | null;
+  note: string | null;
+  created_at: string;
+  last_price: string | null; // Decimal-as-string, null if no bars yet
+  last_price_at: string | null;
+}
+
+export interface AlertList {
+  count: number;
+  alerts: PriceAlert[];
+}
+
+export function listAlerts(
+  opts: {
+    assetId?: number;
+    activeOnly?: boolean;
+    signal?: AbortSignal;
+  } = {},
+): Promise<AlertList> {
+  return apiGet<AlertList>("/api/alerts/", {
+    params: {
+      asset_id: opts.assetId,
+      active_only: opts.activeOnly,
+    },
+    signal: opts.signal,
+  });
+}
+
+export function listPendingAlertNotifications(
+  signal?: AbortSignal,
+): Promise<AlertList> {
+  return apiGet<AlertList>("/api/alerts/pending-notifications/", { signal });
+}
+
+export function getAlert(
+  id: number,
+  signal?: AbortSignal,
+): Promise<PriceAlert> {
+  return apiGet<PriceAlert>(`/api/alerts/${id}/`, { signal });
+}
+
+export interface CreateAlertBody {
+  asset_id: number;
+  threshold: string | number;
+  direction: AlertDirection;
+  note?: string | null;
+}
+
+export function createAlert(
+  body: CreateAlertBody,
+  signal?: AbortSignal,
+): Promise<PriceAlert> {
+  return apiPost<PriceAlert, CreateAlertBody>("/api/alerts/", body, { signal });
+}
+
+export interface UpdateAlertBody {
+  threshold?: string | number;
+  direction?: AlertDirection;
+  is_active?: boolean;
+  note?: string | null;
+  reset?: boolean;
+}
+
+export function updateAlert(
+  id: number,
+  body: UpdateAlertBody,
+  signal?: AbortSignal,
+): Promise<PriceAlert> {
+  return apiPut<PriceAlert, UpdateAlertBody>(`/api/alerts/${id}/`, body, {
+    signal,
+  });
+}
+
+export function deleteAlert(id: number, signal?: AbortSignal): Promise<void> {
+  return apiDelete(`/api/alerts/${id}/`, { signal });
+}
+
+export function markAlertNotified(
+  id: number,
+  signal?: AbortSignal,
+): Promise<PriceAlert> {
+  return apiPost<PriceAlert, Record<string, never>>(
+    `/api/alerts/${id}/mark-notified/`,
+    {},
+    { signal },
+  );
+}

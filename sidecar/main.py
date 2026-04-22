@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from sidecar import __version__, scheduler
+from sidecar.api.alerts import router as alerts_router
 from sidecar.api.assets import router as assets_router
 from sidecar.api.config import router as config_router
 from sidecar.api.health import router as health_router
@@ -89,6 +90,7 @@ app.include_router(prices_router)
 app.include_router(macro_router)
 app.include_router(news_router)
 app.include_router(watchlists_router)
+app.include_router(alerts_router)
 app.include_router(config_router)
 
 

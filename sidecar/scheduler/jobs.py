@@ -22,6 +22,7 @@ from sidecar.ingestion.coingecko_fetcher import fetch_crypto_prices
 from sidecar.ingestion.fred_fetcher import fetch_macro_series_many
 from sidecar.ingestion.rss_fetcher import NewsItem, fetch_news_for_many
 from sidecar.ingestion.yfinance_fetcher import FetcherError, PriceBar, fetch_prices
+from sidecar.services.alerts import check_alerts as _check_alerts
 from sidecar.services.settings import load_effective_config
 
 logger = logging.getLogger(__name__)
@@ -289,3 +290,17 @@ def ingest_macro() -> int:
             len(series_to_id),
         )
         return inserted
+
+
+def check_price_alerts() -> int:
+    """Scan active price alerts against the latest price bar.
+
+    Thin wrapper around ``sidecar.services.alerts.check_alerts`` so the
+    scheduler import path mirrors other jobs (``ingest_*`` live here).
+    Returns the number of alerts newly fired.
+    """
+    try:
+        return _check_alerts()
+    except Exception:  # pragma: no cover — defensive; don't let one bad alert nuke the job
+        logger.exception("check_price_alerts failed")
+        return 0

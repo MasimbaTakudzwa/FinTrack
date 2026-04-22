@@ -67,6 +67,7 @@ fn get_sidecar_port(state: State<'_, SidecarState>) -> u16 {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let external = env::var("FINTRACK_EXTERNAL_SIDECAR").unwrap_or_default() == "1";
             let (port, child) = if external {

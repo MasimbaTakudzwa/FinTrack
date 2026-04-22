@@ -14,7 +14,13 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from sidecar.config import settings
-from sidecar.scheduler.jobs import ingest_crypto, ingest_macro, ingest_news, ingest_prices
+from sidecar.scheduler.jobs import (
+    check_price_alerts,
+    ingest_crypto,
+    ingest_macro,
+    ingest_news,
+    ingest_prices,
+)
 from sidecar.services.settings import load_effective_config
 
 logger = logging.getLogger(__name__)
@@ -105,6 +111,21 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
     else:
         with contextlib.suppress(JobLookupError):
             scheduler.remove_job("ingest_macro")
+
+    if bool(config["check_alerts.enabled"]):
+        scheduler.add_job(
+            check_price_alerts,
+            trigger=IntervalTrigger(
+                minutes=int(config["check_alerts.interval_minutes"])
+            ),
+            id="check_price_alerts",
+            name="Scan active price alerts for threshold crossings",
+            replace_existing=True,
+            next_run_time=now,
+        )
+    else:
+        with contextlib.suppress(JobLookupError):
+            scheduler.remove_job("check_price_alerts")
 
 
 def start() -> BackgroundScheduler | None:

@@ -123,6 +123,30 @@ SETTINGS_SPECS: tuple[SettingSpec, ...] = (
         max=23,
     ),
     SettingSpec(
+        key="check_alerts.enabled",
+        type=SettingType.BOOL,
+        env_attr="enable_alerts_job",
+        default=True,
+        label="Enable price alert checks",
+        description=(
+            "Periodically scan active alerts against the latest price bar. "
+            "Disable to pause all alert firing without deleting alerts."
+        ),
+    ),
+    SettingSpec(
+        key="check_alerts.interval_minutes",
+        type=SettingType.INT,
+        env_attr="check_alerts_interval_minutes",
+        default=1,
+        label="Alert check interval (minutes)",
+        description=(
+            "How often to evaluate active alerts. Lower values catch crossings "
+            "sooner but add more DB work. 1 minute is fine for tens of alerts."
+        ),
+        min=1,
+        max=60,
+    ),
+    SettingSpec(
         key="fred_api_key",
         type=SettingType.SECRET,
         env_attr="fred_api_key",
