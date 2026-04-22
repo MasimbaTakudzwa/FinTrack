@@ -1,0 +1,84 @@
+# .github/workflows/ci.yml
+#
+# Fast verification on every push / PR — keeps main green.
+#
+# Two jobs run in parallel:
+#
+# - `sidecar`: ruff + mypy --strict + pytest on Ubuntu (cheapest runner; the
+#   Python code is pure, no OS-specific paths so Linux is a fine proxy).
+# - `shell`:   eslint + vite build on Ubuntu (same rationale — the React
+#   bundle is OS-independent; we validate the Tauri .app / .msi bundling
+#   on macOS + Windows only in release.yml).
+#
+# Release-grade builds (PyInstaller + Tauri bundler) don't run here —
+# they're expensive and only need to succeed at tag time. See release.yml.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight CI runs on the same ref when a newer commit lands.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sidecar:
+    name: Sidecar (lint + types + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Mypy (strict)
+        run: mypy --strict sidecar/
+
+      - name: Pytest
+        run: pytest -v
+
+  shell:
+    name: Shell (lint + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: shell/pnpm-lock.yaml
+
+      - name: Install JS deps
+        run: pnpm -C shell install --frozen-lockfile
+
+      - name: ESLint
+        run: pnpm -C shell lint
+
+      - name: Vite build
+        run: pnpm -C shell build

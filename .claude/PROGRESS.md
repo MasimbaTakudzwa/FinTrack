@@ -12,9 +12,9 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-22 — Session 003 (checkpoint 14 — Sprint 5 kickoff: PyInstaller freeze + Tauri bundle wiring working end-to-end)
-**Active sprint:** Sprint 5 — Packaging & Distribution (freeze ✅, bundle ✅; GH Actions / signing / updater / release pending)
-**Overall status:** 🟢 Sprints 1–4 complete. Sprint 5 in flight: sidecar is PyInstaller-frozen (90 MB one-folder, boots in ~1 s), Tauri `FinTrack.app` (113 MB) bundles the frozen bundle as a resource and spawns it from `BaseDirectory::Resource` — health + assets + migrations + seed + scheduler all green end-to-end against the bundled binary.
+**Last updated:** 2026-04-22 — Session 003 (checkpoint 15 — Sprint 5 release pipeline scaffolded: CI + Release workflows + updater plugin + release docs)
+**Active sprint:** Sprint 5 — Packaging & Distribution (freeze ✅, bundle ✅, CI workflow ✅, Release workflow ✅, updater plugin ✅, release docs ✅; v0.1.0 tag pending)
+**Overall status:** 🟢 Sprints 1–4 complete. Sprint 5 nearly done: release pipeline fully wired (tag push `v*` → macOS + Windows matrix → PyInstaller freeze → Tauri build → signed installers → draft release). First unsigned v0.1.0 can be cut today; signed releases require secrets to be uploaded (Apple Developer ID, Windows cert, updater keypair — all documented).
 
 ### What was just completed (Sprint 2 first pass)
 - **PricePoint model + migration**: `sidecar/db/models.py` — `PricePoint` with FK to `assets`, `Numeric(18,6)` for o/h/l/c, `BigInteger` volume, composite index `ix_price_points_asset_ts` on `(asset_id, timestamp)`, unique constraint `uq_price_points_asset_ts` for dedup. Alembic migration `0002_create_price_points.py` — runs cleanly on top of 0001. Asset ↔ PricePoint relationship wired with `cascade="all, delete-orphan"`
@@ -154,6 +154,13 @@ User raised 8 items after confirming Sprint 4 worked live. Worked through all of
 - **End-to-end bundle smoke test** (bundled `FinTrack.app`, 113 MB): launched `Contents/MacOS/shell`, stderr showed `[sidecar] spawning frozen binary: …/Resources/_up_/_up_/dist/fintrack-sidecar/fintrack-sidecar`, `[sidecar] spawned pid … on port 55559`, parent-watchdog started, migrations 0001→0007 ran, `[sidecar] healthy on port 55559` at t=3 s, `/api/health/` returned `{"status":"ok","version":"0.1.0"}`, `/api/assets/` returned the 10 seeded assets with `AAPL` id=1 and `BTC-USD` id=8. DB landed at `~/Library/Application Support/FinTrack/fintrack.db` + WAL shard files. Clean shutdown via kill.
 - **Bundle size**: `FinTrack.app` = 113 MB = 10 MB Rust shell + 103 MB frozen Python bundle. First-boot cold start: `.app` → window visible in ~3 s (2 s Tauri health-poll interval + 1 s sidecar boot).
 
+### What was completed (Sprint 5 continued — CI + Release pipeline + updater plugin + docs)
+- **`.github/workflows/ci.yml`** (new): runs on every push to main + every PR. Two parallel jobs on ubuntu-latest: `sidecar` (setup-python 3.13 with pip cache keyed on requirements files → install requirements.txt + requirements-dev.txt → ruff check → mypy --strict → pytest -v) and `shell` (pnpm@10 → Node 22 with pnpm cache → install frozen → eslint → vite build). Concurrency group cancels superseded runs.
+- **`.github/workflows/release.yml`** (new, 21 steps total): triggers on tag push `v*` + `workflow_dispatch`. Matrix = `macos-latest` + `windows-latest`. Per-runner: checkout → setup-python 3.13 + pip cache → install `requirements.txt + requirements-packaging.txt` → `pyinstaller sidecar.spec --clean --noconfirm` → platform-specific verify-binary-exists step → pnpm@10 + Node 22 + cargo cache → conditional Apple Developer ID cert import into an ephemeral keychain (only when `APPLE_CERTIFICATE` secret is present) → conditional Windows PFX import (only when `WINDOWS_CERTIFICATE` secret is present) → install JS deps → `pnpm -C shell tauri build` with conditional `--config` override to disable updater artifacts when `TAURI_SIGNING_PRIVATE_KEY` is unset (so the first unsigned release can ship without the key set up) → upload primary installer artifacts (`if-no-files-found: error` — build fails if the `.dmg`/`.msi`/`.exe` is missing) → upload updater bundles (`warn` — missing is fine). Release job consolidates all artifacts into a draft GitHub Release via `softprops/action-gh-release@v2`.
+- **Tauri updater plugin** (three-part install): `tauri-plugin-updater = "2"` in `src-tauri/Cargo.toml`, `.plugin(tauri_plugin_updater::Builder::new().build())` in `lib.rs` builder chain, `"updater:default"` in `capabilities/default.json`, `@tauri-apps/plugin-updater@2.10.1` in the shell package. `tauri.conf.json` adds `bundle.createUpdaterArtifacts: true` + `plugins.updater.endpoints` pointing at `https://github.com/MasimbaTakudzwa/FinTrack/releases/latest/download/latest.json` + empty `pubkey` placeholder (populated after first `pnpm tauri signer generate`).
+- **Local bundle verification**: `pnpm tauri build --bundles app` with updater plugin enabled produces `FinTrack.app` + `FinTrack.app.tar.gz` (51 MB updater bundle) successfully. Signing step errors when `TAURI_SIGNING_PRIVATE_KEY` isn't set — workflow handles this via conditional `--config` override (verified locally: `pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'` produces clean `.app` with no signing errors).
+- **`docs/development/release_process.md`** (new): end-to-end release runbook. Covers: pipeline overview table (inputs, outputs, artifacts per platform), one-time updater keypair generation (`pnpm tauri signer generate -w ~/.tauri/fintrack.key`), complete GitHub Actions secrets matrix (Apple Developer ID 6 secrets, Windows PFX 2 secrets, updater key 2 secrets, with base64 encoding commands), pre-flight version sync check (tauri.conf.json + Cargo.toml + pyproject.toml), tag-and-push flow, `gh run watch`, draft-release smoke-test checklist (clean-machine install, health indicator, asset page, SQLite DB path, clean shutdown), publish step, rollback procedure (delete release / cut fixed version / instruct users to reinstall), update propagation semantics (GitHub `latest/download/<file>` redirect), troubleshooting (hidden-import failures, xattr "detritus" errors, notarisation hangs, Windows SmartScreen reputation).
+
 ### What to work on NEXT (in order)
 1. [ ] **Live GUI smoke pass** for everything landed this session: `pnpm tauri dev`, then exercise:
    - Dashboard "Add asset" → lookup `TSLA` / `GME` / `BTC-USD` / some obscure micro-cap → confirm bars appear within ~1 min.
@@ -161,13 +168,13 @@ User raised 8 items after confirming Sprint 4 worked live. Worked through all of
    - Market overview → confirm Top losers populates (was always empty before).
    - `/alerts` → delete an alert via the new dialog.
    - AssetDetail → switch between 1H/4H/1D/3D/1W/All, click two points on the chart to measure, create an alert with threshold just above current close, wait ≤1 min for the `check_price_alerts` job, confirm the header bell flashes amber + badge shows "1", open the dropdown to see the triggered alert + watch the OS notification appear.
-2. [ ] **Sprint 5 — Packaging & distribution** (in flight, freeze + bundle ✅):
-   - **GH Actions matrix** (`.github/workflows/release.yml`): `macos-latest` + `windows-latest`, each job runs `pip install -r requirements.txt -r requirements-packaging.txt` → `pyinstaller sidecar.spec --clean --noconfirm` → `pnpm -C shell install` → `pnpm -C shell tauri build` → uploads `.dmg` / `.msi` as workflow artifacts. Triggered on tag push `v*`.
-   - **Mac signing + notarisation**: Apple Developer ID cert stored as GH secret; Tauri bundler does the signing + `xcrun notarytool` submission via `macOSProviderShortName` config keys.
-   - **Windows signing**: EV cert OR Azure Trusted Signing — wiring can use placeholder secrets (`WINDOWS_CERT_THUMBPRINT`, `WINDOWS_SIGNTOOL_PATH`) until the cert is acquired.
-   - **Tauri updater plugin** (`tauri-plugin-updater` v2): GitHub Releases as update feed, signed with `TAURI_SIGNING_PRIVATE_KEY`.
-   - **Release process doc** (`docs/development/release_process.md`): tag → CI run → signed artifacts → draft release → manual promote.
-   - **v0.1.0 tag**: first tagged release with `.dmg` + `.msi` attached.
+2. [ ] **Sprint 5 — Tag v0.1.0** (last remaining item; pipeline ✅, docs ✅):
+   - Verify versions are in sync: `shell/src-tauri/tauri.conf.json` + `shell/src-tauri/Cargo.toml` + `pyproject.toml` all at `0.1.0`.
+   - `git tag -a v0.1.0 -m "FinTrack v0.1.0" && git push origin v0.1.0` — triggers `release.yml`.
+   - Watch the run with `gh run watch`, ~8–12 min.
+   - First release ships unsigned + no-updater (secrets not yet set): installers attach to the draft release via `softprops/action-gh-release@v2`. Smoke-test the `.dmg` / `.msi` on a clean VM before promoting the draft to published.
+   - See `docs/development/release_process.md` for the complete runbook.
+   - (Later) Generate updater keypair, populate `pubkey` in `tauri.conf.json`, upload private key + Apple/Windows certs as GH secrets, cut v0.1.1 — that release will produce signed installers + updater bundles automatically.
 
 ### Active blockers
 - None
@@ -222,6 +229,10 @@ User raised 8 items after confirming Sprint 4 worked live. Worked through all of
 - **yfinance/anyio/greenlet "missing module" warnings are mostly noise**: the `build/sidecar/warn-sidecar.txt` file lists every optional import PyInstaller couldn't trace — including `sniffio`, `exceptiongroup`, `greenlet`, `orjson`, `psutil`, etc. None of these are actually installed or required with Python 3.13 + asyncio (anyio's asyncio backend is self-contained, ExceptionGroup is built-in since 3.11). Don't chase them unless the frozen binary genuinely fails at runtime — debug by running the frozen binary with `PYTHONUNBUFFERED=1` and reading stderr.
 - **PyInstaller frozen binary "silent hang" is usually a debugging artefact, not a real hang**: first attempt to run the bundled binary returned zero stdout, leading to a multi-hour wild-goose-chase. Root cause: earlier orphaned `fintrack-sidecar` processes were holding the test port, causing subsequent launches to exit before printing anything. Fix: `pgrep -f fintrack-sidecar | xargs kill -9` before each test run, use a fresh port each time, always invoke with `PYTHONUNBUFFERED=1`. The binary actually boots in ~1 s on Mac.
 - **Bundled `.app` cold-start path on macOS**: `FinTrack.app/Contents/MacOS/shell` (Tauri binary) → spawns `Contents/Resources/_up_/_up_/dist/fintrack-sidecar/fintrack-sidecar` (PyInstaller bootloader) → the bootloader loads `_internal/Python` framework + archive → runs `sidecar.main` → uvicorn binds port → Tauri poller hits `/api/health/` after ~2–3 s, window visible. No user-visible delay.
+- **Tauri updater — three-part install + config**: Cargo dep (`tauri-plugin-updater`), plugin registration in `lib.rs` builder, `"updater:default"` in capabilities, JS package (`@tauri-apps/plugin-updater`), AND `plugins.updater.endpoints` + `plugins.updater.pubkey` in `tauri.conf.json`. The `pubkey` field is NOT optional — even an empty string causes the bundler to assume updater signing is wanted. Combined with `bundle.createUpdaterArtifacts: true`, this means the build hard-fails with "A public key has been found, but no private key" when `TAURI_SIGNING_PRIVATE_KEY` env var is unset.
+- **Conditional updater artifacts in CI**: the release workflow uses `shell: bash` + an `if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]` check to branch between `pnpm tauri build` (with updater) and `pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'` (without). Lets the first unsigned release ship before the updater keypair has been generated + added as a GH secret. Works on windows-latest because Git Bash ships by default and `shell: bash` uses it.
+- **Apple Developer ID ephemeral keychain pattern**: in CI, base64-decode the `.p12` from `APPLE_CERTIFICATE` secret, create a temporary keychain at `$RUNNER_TEMP/build.keychain` with a random password, `security import` the cert with `-T /usr/bin/codesign -T /usr/bin/security`, `security set-key-partition-list -S apple-tool:,apple:` to allow non-interactive access, then set it as the default keychain. No persistent state on the runner. Same pattern works for mac release signing AND future app-notarisation flows (notarytool reads the same identity).
+- **`if-no-files-found: error` vs `warn`** in GH Actions `upload-artifact@v4`: use `error` for required outputs (installers — a missing `.dmg` means the build silently broke) and `warn` for optional outputs (updater bundles — only produced when signing is set up). The job passes with just warnings, so unsigned releases work end-to-end.
 - Phase 1 dev runs unsigned binaries — code signing deferred to Sprint 5
 - SQLite WAL mode mandatory — scheduler writes concurrently with UI reads
 - Sidecar never binds to 0.0.0.0 — always 127.0.0.1
@@ -369,14 +380,14 @@ User raised 8 items after confirming Sprint 4 worked live. Worked through all of
 **Scope:** Phase 1 close
 
 #### Tasks (refine at Sprint 5 start)
-- [ ] Python sidecar frozen with PyInstaller (one-folder mode) — verify SQLite + yfinance + APScheduler work in frozen bundle
-- [ ] Tauri config bundles frozen sidecar as `external_bin`
-- [ ] GitHub Actions matrix: `macos-latest` + `windows-latest`
-- [ ] Mac code signing + notarisation (Apple Developer ID)
-- [ ] Windows signing (EV cert OR Azure Trusted Signing)
-- [ ] Tauri updater plugin configured (GitHub Releases as update feed)
+- [x] Python sidecar frozen with PyInstaller (one-folder mode) — verify SQLite + yfinance + APScheduler work in frozen bundle
+- [x] Tauri config bundles frozen sidecar (via `resources` plain-directory path; `external_bin` not used — `app.path().resolve(BaseDirectory::Resource)` instead)
+- [x] GitHub Actions matrix: `macos-latest` + `windows-latest`
+- [x] Mac code signing + notarisation hooks (Apple Developer ID — pipeline ready, no-op when secrets unset)
+- [x] Windows signing hooks (EV cert OR Azure Trusted Signing — pipeline ready, no-op when secrets unset)
+- [x] Tauri updater plugin configured (GitHub Releases as update feed; pubkey placeholder; conditional `createUpdaterArtifacts` in CI)
 - [ ] First release: v0.1.0 tagged, `.dmg` + `.msi` published to GitHub Releases
-- [ ] `docs/development/release_process.md`
+- [x] `docs/development/release_process.md`
 
 ---
 
