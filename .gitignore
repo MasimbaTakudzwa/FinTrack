@@ -1,0 +1,50 @@
+# ───── Python ─────
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# ───── Node / pnpm ─────
+node_modules/
+shell/dist/
+.pnpm-store/
+*.log
+
+# ───── Rust / Tauri ─────
+shell/src-tauri/target/
+shell/src-tauri/gen/
+
+# ───── SQLite ─────
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+fintrack.db*
+
+# ───── Secrets ─────
+.env
+.env.local
+.env.*.local
+
+# ───── OS / editor ─────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ───── Misc build artefacts ─────
+*.pid
+.tmp/
