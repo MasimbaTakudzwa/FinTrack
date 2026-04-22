@@ -65,6 +65,46 @@ def _upsert_bars(session: Session, symbol_to_id: dict[str, int], bars: list[Pric
     return result.rowcount or 0
 
 
+def ingest_prices_for_symbols(symbols: Sequence[str]) -> int:
+    """Fetch and persist OHLCV bars for an explicit list of symbols.
+
+    Used both by the scheduled ``ingest_prices`` job (which passes every
+    active asset symbol) and by the "add asset" flow (which passes a single
+    newly-resolved symbol so the user sees bars immediately instead of
+    waiting up to 5 minutes for the next scheduler tick).
+
+    Returns the number of newly inserted PricePoint rows.
+    """
+    unique = list(dict.fromkeys(s.strip().upper() for s in symbols if s.strip()))
+    if not unique:
+        return 0
+
+    try:
+        bars = fetch_prices(unique)
+    except FetcherError as exc:
+        logger.error("ingest_prices_for_symbols: fetch failed for %s: %s", unique, exc)
+        return 0
+
+    if not bars:
+        logger.info(
+            "ingest_prices_for_symbols: 0 bars fetched for %d symbols", len(unique)
+        )
+        return 0
+
+    with session_scope() as session:
+        symbol_to_id = _load_symbol_to_id(session, unique)
+        if not symbol_to_id:
+            return 0
+        inserted = _upsert_bars(session, symbol_to_id, bars)
+        logger.info(
+            "ingest_prices_for_symbols: inserted %d new bars from %d fetched across %d symbols",
+            inserted,
+            len(bars),
+            len(symbol_to_id),
+        )
+        return inserted
+
+
 def ingest_prices() -> int:
     """Fetch latest OHLCV bars for every active asset and persist new rows.
 
@@ -77,29 +117,10 @@ def ingest_prices() -> int:
                 select(Asset.symbol).where(Asset.is_active.is_(True))
             ).scalars()
         )
-        if not symbols:
-            logger.info("ingest_prices: no active assets, skipping")
-            return 0
-
-        try:
-            bars = fetch_prices(symbols)
-        except FetcherError as exc:
-            logger.error("ingest_prices: fetch failed: %s", exc)
-            return 0
-
-        if not bars:
-            logger.info("ingest_prices: fetched 0 bars for %d symbols", len(symbols))
-            return 0
-
-        symbol_to_id = _load_symbol_to_id(session, symbols)
-        inserted = _upsert_bars(session, symbol_to_id, bars)
-        logger.info(
-            "ingest_prices: inserted %d new bars from %d fetched across %d symbols",
-            inserted,
-            len(bars),
-            len(symbols),
-        )
-        return inserted
+    if not symbols:
+        logger.info("ingest_prices: no active assets, skipping")
+        return 0
+    return ingest_prices_for_symbols(symbols)
 
 
 def ingest_crypto() -> int:

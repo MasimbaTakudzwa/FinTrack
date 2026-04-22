@@ -38,6 +38,7 @@ import {
   reorderWatchlistItems,
   updateWatchlist,
 } from "../api/client";
+import { AddAssetModal } from "../components/AddAssetModal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
 interface State {
@@ -68,6 +69,7 @@ export function Watchlists() {
   const [pendingDelete, setPendingDelete] = useState<WatchlistSummary | null>(
     null,
   );
+  const [addAssetOpen, setAddAssetOpen] = useState(false);
 
   const refreshLists = useCallback(
     async (selectId?: number | null, signal?: AbortSignal) => {
@@ -396,6 +398,7 @@ export function Watchlists() {
               onReorder={onReorder}
               onAddAsset={onAddAsset}
               onRemoveAsset={onRemoveAsset}
+              onTrackNew={() => setAddAssetOpen(true)}
               busy={busy}
             />
           )}
@@ -415,6 +418,31 @@ export function Watchlists() {
         onConfirm={confirmDelete}
         onCancel={() => setPendingDelete(null)}
       />
+
+      {addAssetOpen && (
+        <AddAssetModal
+          onClose={() => setAddAssetOpen(false)}
+          // The backend already adds to the default watchlist — which is
+          // usually what you want. If the user is looking at a non-default
+          // watchlist, skip the auto-add and rely on the dropdown flow.
+          addToDefaultWatchlist={state.detail?.is_default ?? true}
+          onCreated={(asset) => {
+            void (async () => {
+              // If the user is on a non-default watchlist, also link the new
+              // asset here — that's the most intuitive outcome given the
+              // button's visual context.
+              if (state.selectedId !== null && !state.detail?.is_default) {
+                try {
+                  await addWatchlistItem(state.selectedId, asset.id);
+                } catch {
+                  // non-fatal — refresh below will surface discrepancies
+                }
+              }
+              await refreshLists(state.selectedId);
+            })();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -555,6 +583,7 @@ interface WatchlistItemsProps {
   onReorder: (items: WatchlistItem[]) => void | Promise<void>;
   onAddAsset: (assetId: number) => void | Promise<void>;
   onRemoveAsset: (assetId: number) => void | Promise<void>;
+  onTrackNew: () => void;
   busy: boolean;
 }
 
@@ -564,6 +593,7 @@ function WatchlistItems({
   onReorder,
   onAddAsset,
   onRemoveAsset,
+  onTrackNew,
   busy,
 }: WatchlistItemsProps) {
   const sensors = useSensors(
@@ -643,6 +673,16 @@ function WatchlistItems({
           >
             <Plus className="h-3.5 w-3.5" />
             Add
+          </button>
+          <button
+            type="button"
+            onClick={onTrackNew}
+            disabled={busy}
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+            title="Track a symbol that isn't in your library yet"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Track new…
           </button>
         </form>
       </div>

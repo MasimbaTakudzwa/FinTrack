@@ -157,6 +157,42 @@ export function listAssets(
   });
 }
 
+export interface AssetLookup {
+  symbol: string;
+  name: string;
+  asset_type: AssetType;
+  exchange: string | null;
+  currency: string | null;
+}
+
+export function lookupAsset(
+  symbol: string,
+  signal?: AbortSignal,
+): Promise<AssetLookup> {
+  return apiPost<AssetLookup, { symbol: string }>(
+    "/api/assets/lookup/",
+    { symbol },
+    { signal },
+  );
+}
+
+export interface CreateAssetResult {
+  asset: Asset;
+  bars_ingested: number;
+  added_to_watchlist: boolean;
+}
+
+export function createAsset(
+  body: { symbol: string; add_to_default_watchlist?: boolean },
+  signal?: AbortSignal,
+): Promise<CreateAssetResult> {
+  return apiPost<CreateAssetResult, typeof body>(
+    "/api/assets/",
+    body,
+    { signal },
+  );
+}
+
 // ---------- Prices ----------
 
 export interface PricePoint {

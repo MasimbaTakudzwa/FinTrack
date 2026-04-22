@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { ListPlus, RefreshCw } from "lucide-react";
+import { ListPlus, Plus, RefreshCw } from "lucide-react";
 import {
   ApiError,
   type Asset,
@@ -10,6 +10,7 @@ import {
   getPriceSeries,
   listAssets,
 } from "../api/client";
+import { AddAssetModal } from "../components/AddAssetModal";
 import { AssetCard } from "../components/AssetCard";
 
 interface LoadState {
@@ -93,6 +94,8 @@ async function loadAll(
 export function Dashboard() {
   const [state, setState] = useState<LoadState>(INITIAL);
   const [tick, setTick] = useState(0);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addBanner, setAddBanner] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -140,6 +143,14 @@ export function Dashboard() {
           <p className="text-xs text-zinc-500 dark:text-zinc-400">{subtitle}</p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setAddOpen(true)}
+            className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Add asset
+          </button>
           <Link
             to="/watchlists"
             className="inline-flex items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
@@ -158,6 +169,19 @@ export function Dashboard() {
           </button>
         </div>
       </div>
+
+      {addBanner && (
+        <div className="mb-4 flex items-center justify-between rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300">
+          <span>{addBanner}</span>
+          <button
+            type="button"
+            onClick={() => setAddBanner(null)}
+            className="text-xs font-medium underline hover:no-underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {state.assetsError && (
         <div className="mb-4 rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-300">
@@ -197,6 +221,20 @@ export function Dashboard() {
           />
         ))}
       </div>
+
+      {addOpen && (
+        <AddAssetModal
+          onClose={() => setAddOpen(false)}
+          onCreated={(asset, bars, added) => {
+            const parts = [`Added ${asset.symbol} (${asset.name})`];
+            if (bars > 0) parts.push(`${bars} bars ingested`);
+            if (added) parts.push("added to default watchlist");
+            setAddBanner(parts.join(" · "));
+            // Refresh the dashboard so the new asset shows up immediately.
+            setTick((t) => t + 1);
+          }}
+        />
+      )}
     </div>
   );
 }
