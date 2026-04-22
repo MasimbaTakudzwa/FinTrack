@@ -79,6 +79,55 @@ def test_upgrade_to_head_creates_settings_table(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_upgrade_to_head_creates_article_tables(tmp_path: Path) -> None:
+    db_file = tmp_path / "test.db"
+    upgrade_to_head(db_path=str(db_file))
+
+    conn = sqlite3.connect(db_file)
+    try:
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "articles" in tables
+        assert "article_assets" in tables
+
+        art_cols = {r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()}
+        assert {
+            "id",
+            "url",
+            "headline",
+            "source",
+            "published_at",
+            "summary",
+            "created_at",
+        } <= art_cols
+
+        art_indexes = {
+            r[1] for r in conn.execute("PRAGMA index_list(articles)").fetchall()
+        }
+        assert "ix_articles_url" in art_indexes
+        assert "ix_articles_published_at" in art_indexes
+
+        assoc_cols = [
+            r for r in conn.execute("PRAGMA table_info(article_assets)").fetchall()
+        ]
+        assoc_names = {r[1] for r in assoc_cols}
+        assert {"article_id", "asset_id"} <= assoc_names
+        pk_cols = sorted(r[1] for r in assoc_cols if r[5])
+        assert pk_cols == ["article_id", "asset_id"], (
+            "article_assets should have composite PK (article_id, asset_id)"
+        )
+
+        fks = conn.execute("PRAGMA foreign_key_list(article_assets)").fetchall()
+        tables_referenced = {fk[2] for fk in fks}
+        assert {"articles", "assets"} <= tables_referenced
+    finally:
+        conn.close()
+
+
 def test_upgrade_to_head_creates_macro_tables(tmp_path: Path) -> None:
     db_file = tmp_path / "test.db"
     upgrade_to_head(db_path=str(db_file))

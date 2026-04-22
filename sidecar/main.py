@@ -16,6 +16,7 @@ from sidecar.api.assets import router as assets_router
 from sidecar.api.config import router as config_router
 from sidecar.api.health import router as health_router
 from sidecar.api.macro import router as macro_router
+from sidecar.api.news import router as news_router
 from sidecar.api.prices import router as prices_router
 from sidecar.config import settings
 from sidecar.db.migrations_runner import upgrade_to_head
@@ -76,6 +77,7 @@ app.include_router(health_router)
 app.include_router(assets_router)
 app.include_router(prices_router)
 app.include_router(macro_router)
+app.include_router(news_router)
 app.include_router(config_router)
 
 

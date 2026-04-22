@@ -9,9 +9,18 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from sidecar.db.engine import session_scope
-from sidecar.db.models import Asset, AssetType, MacroDataPoint, MacroIndicator, PricePoint
+from sidecar.db.models import (
+    Article,
+    ArticleAsset,
+    Asset,
+    AssetType,
+    MacroDataPoint,
+    MacroIndicator,
+    PricePoint,
+)
 from sidecar.ingestion.coingecko_fetcher import fetch_crypto_prices
 from sidecar.ingestion.fred_fetcher import fetch_macro_series_many
+from sidecar.ingestion.rss_fetcher import NewsItem, fetch_news_for_many
 from sidecar.ingestion.yfinance_fetcher import FetcherError, PriceBar, fetch_prices
 from sidecar.services.settings import load_effective_config
 
@@ -131,6 +140,98 @@ def ingest_crypto() -> int:
             len(symbols),
         )
         return inserted
+
+
+def _upsert_articles(
+    session: Session, items: Sequence[NewsItem]
+) -> dict[str, int]:
+    """Insert any missing articles and return a `{url: id}` map for all input URLs."""
+    if not items:
+        return {}
+    payload = [
+        {
+            "url": item.url,
+            "headline": item.headline,
+            "source": item.source,
+            "published_at": item.published_at,
+            "summary": item.summary,
+        }
+        for item in items
+    ]
+    stmt = sqlite_insert(Article).values(payload).on_conflict_do_nothing(
+        index_elements=["url"]
+    )
+    session.execute(stmt)
+    # Look up ids for ALL input URLs — both newly inserted and pre-existing.
+    urls = {item.url for item in items}
+    rows = session.execute(
+        select(Article.url, Article.id).where(Article.url.in_(urls))
+    ).all()
+    return {url: aid for url, aid in rows}
+
+
+def _upsert_article_assets(
+    session: Session,
+    items: Sequence[NewsItem],
+    url_to_article_id: dict[str, int],
+    symbol_to_asset_id: dict[str, int],
+) -> int:
+    """Link articles to assets based on the symbol each item was fetched for."""
+    assoc_rows: list[dict[str, int]] = []
+    for item in items:
+        article_id = url_to_article_id.get(item.url)
+        asset_id = symbol_to_asset_id.get(item.symbol)
+        if article_id is None or asset_id is None:
+            continue
+        assoc_rows.append({"article_id": article_id, "asset_id": asset_id})
+    if not assoc_rows:
+        return 0
+    stmt = sqlite_insert(ArticleAsset).values(assoc_rows).on_conflict_do_nothing(
+        index_elements=["article_id", "asset_id"]
+    )
+    result = cast(CursorResult[object], session.execute(stmt))
+    return result.rowcount or 0
+
+
+def ingest_news() -> int:
+    """Fetch Yahoo Finance RSS news for every active asset.
+
+    Articles are dedup'd by URL across assets — the same headline mentioning
+    multiple symbols is stored once and linked to each matched asset.
+
+    Returns the number of newly inserted article_asset association rows (which
+    is close to, but not exactly, "new articles" — an existing article linking
+    to a new asset also counts).
+    """
+    with session_scope() as session:
+        rows = list(
+            session.execute(
+                select(Asset.symbol, Asset.id).where(Asset.is_active.is_(True))
+            ).all()
+        )
+        if not rows:
+            logger.info("ingest_news: no active assets, skipping")
+            return 0
+
+        symbol_to_id = {sym: aid for sym, aid in rows}
+        items = fetch_news_for_many(list(symbol_to_id.keys()))
+        if not items:
+            logger.info(
+                "ingest_news: fetched 0 items across %d symbols", len(symbol_to_id)
+            )
+            return 0
+
+        url_to_article_id = _upsert_articles(session, items)
+        linked = _upsert_article_assets(
+            session, items, url_to_article_id, symbol_to_id
+        )
+        logger.info(
+            "ingest_news: linked %d new (article,asset) pairs from %d items across %d symbols",
+            linked,
+            len(items),
+            len(symbol_to_id),
+        )
+        return linked
 
 
 def ingest_macro() -> int:

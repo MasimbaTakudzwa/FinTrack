@@ -12,9 +12,9 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-22 — Session 003 (checkpoint 8 — cold-start bug fix: interval jobs now fire immediately)
-**Active sprint:** Sprint 3 — React UI Dashboard (complete; Sprint 4 next)
-**Overall status:** 🟢 Sprints 1, 2 & 3 complete — dashboard, asset detail chart, market overview, full mutable-settings stack, and interval jobs now populate data on first launch instead of after one full interval
+**Last updated:** 2026-04-22 — Session 003 (checkpoint 9 — Sprint 4A complete: news ingestion pipeline via Yahoo RSS)
+**Active sprint:** Sprint 4 — News, Watchlists & Desktop Alerts (4A ✅ done, 4B next)
+**Overall status:** 🟢 Sprints 1, 2 & 3 complete; Sprint 4A (news ingestion backend) complete — 162 unique articles ingested across 10 seed symbols on live smoke test
 
 ### What was just completed (Sprint 2 first pass)
 - **PricePoint model + migration**: `sidecar/db/models.py` — `PricePoint` with FK to `assets`, `Numeric(18,6)` for o/h/l/c, `BigInteger` volume, composite index `ix_price_points_asset_ts` on `(asset_id, timestamp)`, unique constraint `uq_price_points_asset_ts` for dedup. Alembic migration `0002_create_price_points.py` — runs cleanly on top of 0001. Asset ↔ PricePoint relationship wired with `cascade="all, delete-orphan"`
@@ -60,9 +60,30 @@
 - **New test** (`test_register_jobs_fires_interval_jobs_immediately_on_first_register`) asserts `next_run_time` for both interval jobs lands inside the `_register_jobs()` call window (±1 s).
 - **Verifications**: `pytest` 81/81 green, `ruff check .` clean, `mypy --strict sidecar/` clean on 28 files.
 
+### What was completed (Sprint 4A — news ingestion pipeline, backend)
+- **Article + ArticleAsset models** (`sidecar/db/models.py`): `Article` keyed on `url` (unique, 1024 chars, indexed) — stores `headline` (512 chars), `source` (128 chars), `published_at` (tz-aware, indexed), nullable `summary` (Text), `created_at`. `ArticleAsset` is the M2M link table with composite PK `(article_id, asset_id)`, both FKs `ON DELETE CASCADE`, asset_id indexed for filter-by-symbol queries. `Article.assets` relationship via `secondary="article_assets"`, `backref="articles"`.
+- **Alembic migration 0005** (`sidecar/db/migrations/versions/0005_create_articles.py`): creates `articles` + `article_assets` with indexes `ix_articles_url`, `ix_articles_published_at`, `ix_article_assets_asset_id`. Clean up on downgrade.
+- **RSS fetcher** (`sidecar/ingestion/rss_fetcher.py`): `fetch_news_for_symbol(symbol)` hits `https://feeds.finance.yahoo.com/rss/2.0/headline?s={SYMBOL}&region=US&lang=en-US` via `requests.get` (configurable timeout) then `feedparser.parse(bytes)`. `NewsItem` dataclass holds `(url, headline, source, published_at, summary, symbol)`. `_parse_published` converts `published_parsed`/`updated_parsed` struct_time → UTC datetime, tolerates missing fields. Headlines truncated at 512 chars; source at 128. Entries missing URL, headline, or pubDate are dropped. `source` comes from per-entry `entry.source["title"]` when set; otherwise falls back to the literal `"Yahoo Finance"`. Exponential backoff with jitter (base 1s, cap 15s, `MAX_ATTEMPTS=3`) via `_backoff_sleep`. `fetch_news_for_many(symbols)` iterates and swallows per-symbol `RSSFetcherError` so one bad symbol doesn't kill the batch. `feedparser` 6.0.12 ships typed stubs so no `# type: ignore` needed.
+- **ingest_news job** (`sidecar/scheduler/jobs.py`): `_upsert_articles()` uses SQLite `INSERT ... ON CONFLICT(url) DO NOTHING` to dedup by URL, then `SELECT url, id` for the batch to hydrate IDs for both new + existing. `_upsert_article_assets()` inserts composite-PK pairs with `ON CONFLICT(article_id, asset_id) DO NOTHING`. Full job flow: load active symbols → `fetch_news_for_many` → map back to asset IDs → upsert articles → upsert associations. Returns `(articles_inserted, links_inserted)`. Short-circuits when no active assets.
+- **Config + settings**: new `enable_news_job: bool = True` and `ingest_news_interval_minutes: int = 15` in `sidecar/config.py`. Two new entries in `SETTINGS_SPECS` (`sidecar/services/settings.py`) — `ingest_news.enabled` (BOOL, env_attr `enable_news_job`) and `ingest_news.interval_minutes` (INT, 1–1440). Brings total mutable settings to 7.
+- **Scheduler registration** (`sidecar/scheduler/__init__.py`): `_register_jobs` gates `ingest_news` on the effective-config flag (adds or removes accordingly), uses `IntervalTrigger(minutes=config["ingest_news.interval_minutes"])` with `next_run_time=now` so the first run fires immediately on cold start / reconfigure — same pattern as prices/crypto.
+- **API** (`sidecar/api/news.py`): `GET /api/news/?symbol=&from=&to=&limit=` returns `{count, articles: [{id, url, headline, source, published_at, summary, symbols[]}]}`. Newest-first, `limit` clamped 1–1000 (default 200). Symbol filter is case-insensitive, 404 on unknown symbol. Two-query hydration: load articles for the filter, then `SELECT article_id, assets.symbol FROM article_assets JOIN assets` scoped to those article_ids, group into lists. Wired into `sidecar/main.py` via `app.include_router(news_router)`.
+- **Tests added** (21 new, total 102):
+  - `tests/test_migrations.py`: asserts 0005 creates both tables with correct columns, composite PK, FKs, and both indexes.
+  - `tests/test_rss_fetcher.py` (5): parse real-shaped RSS XML, skip entries missing critical fields, truncate 512-char headline, retry-then-raise after `MAX_ATTEMPTS`, `fetch_news_for_many` swallows per-symbol errors.
+  - `tests/test_ingest_news.py` (4): insert+link happy path, dedup on same URL, multi-asset linking (one article → two ArticleAsset rows), no-active-assets short-circuit.
+  - `tests/test_api_news.py` (9): all-newest-first, symbols hydration, filter by symbol, case-insensitive, 404 unknown, date range, limit clamp, empty DB, limit validation 422.
+  - `tests/test_scheduler_reconfigure.py`: DEFAULT_CONFIG expanded with news keys; added tests for news default-on, news enable-toggle removal; immediate-fire test now iterates prices/crypto/news.
+  - `tests/test_api_config.py` / `tests/test_settings_service.py`: expected-key counts bumped to 7.
+- **Live smoke test**: ran `upgrade_to_head()` then `ingest_news()` against the worktree DB — **162 unique articles ingested, 200 (article, asset) links** (20 per symbol across all 10 seeded assets). Re-run produced 0 new articles, 0 new links — idempotent.
+- **Verifications**: `pytest` 102/102 green, `ruff check .` clean, `mypy --strict sidecar/` clean on 31 files.
+
 ### What to work on NEXT (in order)
-1. [ ] **Live GUI verification** — run `pnpm tauri dev` to smoke-test the full Sprint 3 surface: Dashboard → AssetCard click → AssetDetail candle chart, Refresh, theme toggle (system/light/dark), nav-link active states, Market overview links, Settings page (load, change an int, save, observe source badge flip to `db`, clear it, revert to `env`, change theme).
-2. [ ] **Sprint 4 — News, Watchlists & Desktop Alerts** — next sprint. See SPRINT BACKLOG for tasks.
+1. [x] **Live GUI verification** — user confirmed post-fix `pnpm tauri dev` works as intended: Dashboard sparklines + AssetDetail candle chart populate on cold start, theme toggle + settings save flow all green (no regressions reported).
+2. [x] **Sprint 4A — News ingestion pipeline (backend)** — Article/ArticleAsset models, migration 0005, Yahoo RSS fetcher, ingest_news job, config + scheduler wiring, `/api/news/` endpoint, full test coverage, live smoke test with 162 articles. Done this session.
+3. [ ] **Sprint 4B — News UI**: replace the AssetDetail news-sidebar placeholder with live data; add a standalone `/news` page with filter-by-symbol and infinite scroll. Sidebar nav entry. API client additions: `listNews({ symbol, from, to, limit })`.
+4. [ ] **Sprint 4C — Watchlists**: `Watchlist` + `WatchlistItem` models (position for drag-reorder), CRUD endpoints, UI (add/remove/reorder). Dashboard pivots to reading from the default watchlist.
+5. [ ] **Sprint 4D — Price alerts + desktop notifications**: `PriceAlert` model, `check_price_alerts` job (5-min interval, reads latest `PricePoint` for each active alert), Tauri `notification` plugin wired to a sidecar→shell event bridge, alert-history UI page, alert-create modal from AssetDetail.
 
 ### Active blockers
 - None
@@ -87,6 +108,10 @@
 - **APScheduler `IntervalTrigger` first fire defaults to `now + interval`, NOT now**: cold-starting a sidecar with a 5-min interval job leaves the dashboard empty for 5 minutes. Pass `next_run_time=datetime.now(UTC)` to `add_job` to get an immediate first fire. Only apply to interval jobs — cron jobs should honour their wall-clock schedule.
 - **Settings precedence rule**: DB row > env var > hardcoded default. Set via env vars you want pinned for dev/tests/CI; once a user writes via the UI, the DB row takes over. `FINTRACK_ENABLE_SCHEDULER`/`FINTRACK_ENABLE_SEED` deliberately stay env-only (kill switches), as do `FINTRACK_PORT`/`FINTRACK_DB_PATH`/`LOG_LEVEL` (runtime-required or restart-required).
 - **`ingest_macro` reads FRED key lazily**: job calls `load_effective_config()` on each invocation so `/api/config/` updates take effect without a sidecar restart. The scheduler's add-or-remove decision for the macro job itself also uses effective config (via `_register_jobs`).
+- **feedparser typed stubs**: `feedparser` ≥ 6.0.12 ships its own type hints. Do NOT add `# type: ignore[import-untyped]` — mypy `--strict` will flag it as an unused ignore.
+- **`datetime(*struct_time[:6], tzinfo=UTC)` fails mypy**: unpack shape confuses the type checker into thinking `tzinfo` gets multiple values. Unpack explicitly: `datetime(val[0], val[1], val[2], val[3], val[4], val[5], tzinfo=UTC)` and include `IndexError` in the except tuple for short struct_times.
+- **Upsert-then-SELECT for SQLite without RETURNING**: to dedup `articles` by URL and hydrate IDs for both new + existing rows, run `INSERT ... ON CONFLICT(url) DO NOTHING` then `SELECT url, id WHERE url IN (...)` in the same transaction. Works for the composite-PK link table too — `ON CONFLICT(article_id, asset_id) DO NOTHING`.
+- **Yahoo RSS feed is unofficial** like yfinance. Shape observed on 2026-04-22: 20 items per symbol, `<title>/<link>/<pubDate>/<description>`, channel title `"Yahoo Finance - {SYMBOL}"`. Per-entry `source` field is rarely populated, so the fetcher falls back to the literal `"Yahoo Finance"`. Keep fetcher source-swappable against future Yahoo breakage.
 - Phase 1 dev runs unsigned binaries — code signing deferred to Sprint 5
 - SQLite WAL mode mandatory — scheduler writes concurrently with UI reads
 - Sidecar never binds to 0.0.0.0 — always 127.0.0.1
@@ -193,16 +218,38 @@
 **Goal:** News aggregation, local watchlists, desktop-native price alerts
 **Scope:** Phase 1
 
-#### Tasks (refine at Sprint 4 start)
-- [ ] `Article` model + `sidecar/ingestion/rss_fetcher.py` (Yahoo Finance RSS via `feedparser`)
-- [ ] `ingest_news` scheduler job (15-min interval per watchlisted symbol)
-- [ ] `GET /api/news/`, `GET /api/news/?symbol=AAPL`
-- [ ] `Watchlist` + `WatchlistItem` models (local tables, no user_id — single user)
-- [ ] Watchlist CRUD endpoints + UI (add/remove/reorder via drag)
-- [ ] `PriceAlert` model (asset_id, threshold, direction, triggered flag, triggered_at)
-- [ ] `check_price_alerts` scheduler job (5-min interval)
-- [ ] Desktop notifications via Tauri `notification` plugin when alert triggers
-- [ ] Alert history page in UI
+#### Milestone 4A — News ingestion pipeline (backend)
+- [x] `Article` model + `article_assets` association table in `sidecar/db/models.py`
+- [x] Alembic migration `0005_create_articles.py`
+- [x] `sidecar/ingestion/rss_fetcher.py` — Yahoo Finance RSS via `feedparser`, per-symbol, exponential backoff + timeout
+- [x] `ingest_news` scheduler job (polls every active asset's RSS feed, dedups on `url`, associates to asset(s))
+- [x] New settings keys: `ingest_news.enabled` (bool, default true), `ingest_news.interval_minutes` (int, default 15)
+- [x] `GET /api/news/?symbol=&from=&to=&limit=` — list articles newest-first, optional symbol filter
+- [x] Tests: fetcher (mocked `_http_get`), job upsert/idempotency, API filter + 404 on unknown symbol, scheduler reconfigure
+
+#### Milestone 4B — News UI
+- [ ] Wire real data into the AssetDetail "Recent news" sidebar (replace Sprint 3 placeholder)
+- [ ] New `/news` standalone page with symbol filter dropdown + time-grouped list
+- [ ] Sidebar nav entry
+- [ ] Empty / error / loading states consistent with Dashboard
+
+#### Milestone 4C — Watchlists
+- [ ] `Watchlist` + `WatchlistItem` models (single-user, no user_id — `position` int for drag-reorder)
+- [ ] Alembic migration `0006_create_watchlists.py`
+- [ ] Seed a "Default" watchlist with all active assets on first migration
+- [ ] CRUD endpoints: `GET/POST /api/watchlists/`, `GET/PUT/DELETE /api/watchlists/{id}/`, `POST/DELETE /api/watchlists/{id}/items/`, `PUT /api/watchlists/{id}/items/reorder`
+- [ ] UI: `/watchlists` page with list-of-lists + item management + drag-reorder (`@dnd-kit`)
+- [ ] Dashboard pivots to read from default watchlist instead of "all active assets"
+
+#### Milestone 4D — Price alerts + desktop notifications
+- [ ] `PriceAlert` model (asset_id FK, threshold Decimal, direction enum above/below, is_active, triggered_at nullable)
+- [ ] Alembic migration `0007_create_price_alerts.py`
+- [ ] `check_price_alerts` scheduler job (5-min interval, reads latest PricePoint per active alert, flips `triggered_at` when crossed)
+- [ ] Tauri `notification` plugin wired + permission request on first alert-fire
+- [ ] Sidecar→shell bridge for notification delivery (options: SSE endpoint consumed by shell, or Tauri event from a polling shell-side watcher — pick simplest)
+- [ ] CRUD endpoints: `GET/POST /api/alerts/`, `PUT/DELETE /api/alerts/{id}/`
+- [ ] Alert-create modal from AssetDetail ("alert me when AAPL > $250")
+- [ ] Alert-history UI page with triggered-state indicator
 
 ---
 

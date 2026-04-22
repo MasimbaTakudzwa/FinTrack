@@ -92,6 +92,27 @@ SETTINGS_SPECS: tuple[SettingSpec, ...] = (
         max=1440,
     ),
     SettingSpec(
+        key="ingest_news.enabled",
+        type=SettingType.BOOL,
+        env_attr="enable_news_job",
+        default=True,
+        label="Enable news ingest",
+        description=(
+            "Pull Yahoo Finance RSS headlines for every active asset. Disable "
+            "to cut outbound traffic entirely."
+        ),
+    ),
+    SettingSpec(
+        key="ingest_news.interval_minutes",
+        type=SettingType.INT,
+        env_attr="ingest_news_interval_minutes",
+        default=15,
+        label="News ingest interval (minutes)",
+        description="How often Yahoo RSS is polled for new headlines.",
+        min=1,
+        max=1440,
+    ),
+    SettingSpec(
         key="ingest_macro.cron_hour_utc",
         type=SettingType.INT,
         env_attr="ingest_macro_cron_hour",

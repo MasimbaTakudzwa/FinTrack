@@ -114,6 +114,47 @@ class MacroDataPoint(Base):
     )
 
 
+class Article(Base):
+    """News article harvested from RSS feeds.
+
+    `url` is the dedup key — the same article appearing on multiple asset feeds
+    is stored once and linked via `article_assets` to every associated asset.
+    """
+
+    __tablename__ = "articles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    url: Mapped[str] = mapped_column(String(1024), unique=True, index=True)
+    headline: Mapped[str] = mapped_column(String(512))
+    source: Mapped[str] = mapped_column(String(128))
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+
+    assets: Mapped[list[Asset]] = relationship(
+        secondary="article_assets",
+        backref="articles",
+    )
+
+
+class ArticleAsset(Base):
+    """Many-to-many association between articles and assets."""
+
+    __tablename__ = "article_assets"
+
+    article_id: Mapped[int] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True
+    )
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
 class Setting(Base):
     """Key-value runtime settings persisted in SQLite.
 

@@ -37,6 +37,8 @@ DEFAULT_CONFIG = {
     "ingest_prices.interval_minutes": 5,
     "ingest_crypto.enabled": False,
     "ingest_crypto.interval_minutes": 15,
+    "ingest_news.enabled": True,
+    "ingest_news.interval_minutes": 15,
     "ingest_macro.cron_hour_utc": 6,
     "fred_api_key": "",
 }
@@ -51,6 +53,27 @@ def test_register_jobs_adds_ingest_prices_with_default_interval(
     assert job.trigger.interval.total_seconds() == 5 * 60
     assert paused_scheduler.get_job("ingest_crypto") is None
     assert paused_scheduler.get_job("ingest_macro") is None
+
+
+def test_register_jobs_adds_news_job_by_default(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    job = paused_scheduler.get_job("ingest_news")
+    assert job is not None
+    assert job.trigger.interval.total_seconds() == 15 * 60
+
+
+def test_register_jobs_removes_disabled_news(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    assert paused_scheduler.get_job("ingest_news") is not None
+
+    _register_jobs(
+        paused_scheduler, dict(DEFAULT_CONFIG, **{"ingest_news.enabled": False})
+    )
+    assert paused_scheduler.get_job("ingest_news") is None
 
 
 def test_register_jobs_adds_crypto_when_enabled(
@@ -118,7 +141,8 @@ def test_register_jobs_fires_interval_jobs_immediately_on_first_register(
     """Interval jobs must have ``next_run_time`` set to ~now, not now+interval.
 
     Without this, a freshly-launched sidecar shows an empty dashboard for the
-    first 5-15 minutes because ``ingest_prices`` hasn't fired yet.
+    first 5-15 minutes because ``ingest_prices`` / ``ingest_news`` haven't
+    fired yet.
     """
     before = datetime.now(UTC)
     _register_jobs(
@@ -127,15 +151,13 @@ def test_register_jobs_fires_interval_jobs_immediately_on_first_register(
     )
     after = datetime.now(UTC)
 
-    prices_job = paused_scheduler.get_job("ingest_prices")
-    crypto_job = paused_scheduler.get_job("ingest_crypto")
-    assert prices_job is not None and prices_job.next_run_time is not None
-    assert crypto_job is not None and crypto_job.next_run_time is not None
-
-    # next_run_time lands in the window straddling the _register_jobs call.
     window = (before - timedelta(seconds=1), after + timedelta(seconds=1))
-    assert window[0] <= prices_job.next_run_time <= window[1]
-    assert window[0] <= crypto_job.next_run_time <= window[1]
+    for job_id in ("ingest_prices", "ingest_crypto", "ingest_news"):
+        job = paused_scheduler.get_job(job_id)
+        assert job is not None and job.next_run_time is not None
+        assert window[0] <= job.next_run_time <= window[1], (
+            f"{job_id} next_run_time outside expected window"
+        )
 
 
 def test_reconfigure_returns_false_when_scheduler_not_running(

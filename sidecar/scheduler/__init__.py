@@ -14,7 +14,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from sidecar.config import settings
-from sidecar.scheduler.jobs import ingest_crypto, ingest_macro, ingest_prices
+from sidecar.scheduler.jobs import ingest_crypto, ingest_macro, ingest_news, ingest_prices
 from sidecar.services.settings import load_effective_config
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,21 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
     else:
         with contextlib.suppress(JobLookupError):
             scheduler.remove_job("ingest_crypto")
+
+    if bool(config["ingest_news.enabled"]):
+        scheduler.add_job(
+            ingest_news,
+            trigger=IntervalTrigger(
+                minutes=int(config["ingest_news.interval_minutes"])
+            ),
+            id="ingest_news",
+            name="Ingest news articles from Yahoo RSS",
+            replace_existing=True,
+            next_run_time=now,
+        )
+    else:
+        with contextlib.suppress(JobLookupError):
+            scheduler.remove_job("ingest_news")
 
     if config.get("fred_api_key"):
         scheduler.add_job(

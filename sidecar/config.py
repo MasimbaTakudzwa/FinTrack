@@ -25,8 +25,10 @@ class Settings(BaseSettings):
     enable_scheduler: bool = True
     enable_seed: bool = True
     enable_crypto_job: bool = False
+    enable_news_job: bool = True
     ingest_prices_interval_minutes: int = 5
     ingest_crypto_interval_minutes: int = 15
+    ingest_news_interval_minutes: int = 15
     ingest_macro_cron_hour: int = 6
 
     def resolved_db_path(self) -> str:

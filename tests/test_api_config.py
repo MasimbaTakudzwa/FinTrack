@@ -22,6 +22,8 @@ def test_get_config_returns_defaults(isolated_db: Path) -> None:
         "ingest_prices.interval_minutes",
         "ingest_crypto.enabled",
         "ingest_crypto.interval_minutes",
+        "ingest_news.enabled",
+        "ingest_news.interval_minutes",
         "ingest_macro.cron_hour_utc",
         "fred_api_key",
     }
@@ -132,7 +134,7 @@ def test_put_empty_updates_noop(isolated_db: Path) -> None:
     r = client.put("/api/config/", json={"updates": {}})
     assert r.status_code == 200
     # Should return current state without error.
-    assert len(r.json()["settings"]) == 5
+    assert len(r.json()["settings"]) == 7
 
 
 def test_put_atomic_on_validation_failure(isolated_db: Path) -> None:
