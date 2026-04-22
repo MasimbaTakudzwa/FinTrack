@@ -149,6 +149,17 @@ are produced, and the updater is effectively disabled. This is the right
 shape for the first release (v0.1.0): nothing exists to auto-update from,
 so the updater signing key is optional on day one.
 
+For **local** unsigned bundles (outside CI), use the dedicated script:
+
+```bash
+pnpm -C shell tauri:build:unsigned
+```
+
+It's the same `--config` override the workflow applies in the unsigned
+branch. Plain `pnpm -C shell tauri build` without the key set will abort
+with `A public key has been found, but no private key. Make sure to set
+TAURI_SIGNING_PRIVATE_KEY environment variable.`
+
 Once the key is added to secrets, subsequent releases ship full updater
 bundles automatically — no workflow changes needed.
 
@@ -280,6 +291,27 @@ on a clean machine.
   `WARNING: Hidden import 'foo' not found`.
 - Add to `hiddenimports` in `sidecar.spec` (or to the appropriate
   `collect_submodules` call) and re-run.
+
+**Mac build fails with `security: SecKeychainItemImport: One or more parameters passed to a function were not valid`**
+- Tauri's macOS bundler is "truthy == sign it": if `APPLE_CERTIFICATE` is
+  exported as an empty string (which is what `${{ secrets.APPLE_CERTIFICATE }}`
+  expands to when the secret is unset), Tauri will attempt `security import`
+  with zero bytes and fail.
+- The release workflow handles this by carrying secrets through as
+  `_SEC_*`-prefixed env vars and only re-exporting the canonical
+  `APPLE_CERTIFICATE` / `APPLE_*` / `WINDOWS_CERTIFICATE` / etc. when the
+  source secret is non-empty. If you add new signing env vars, extend the
+  same pattern in `.github/workflows/release.yml`.
+
+**Local `pnpm tauri build` fails with `A public key has been found, but no private key`**
+- Plain `tauri build` honours `bundle.createUpdaterArtifacts: true` from
+  `tauri.conf.json` and demands `TAURI_SIGNING_PRIVATE_KEY` to sign the
+  `.app.tar.gz` / `.msi.zip` updater bundles.
+- For unsigned local bundles, use `pnpm -C shell tauri:build:unsigned`
+  (override that disables updater artifacts).
+- For signed local bundles, first generate the keypair (see "Updater
+  keypair" above) and `export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.fintrack/fintrack.key)"`
+  before `pnpm -C shell tauri build`.
 
 **Build succeeds but app launches to a white window**
 - Sidecar isn't starting. Run `./fintrack-sidecar` inside

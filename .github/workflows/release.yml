@@ -184,30 +184,60 @@ jobs:
       - name: Install JS deps
         run: pnpm -C shell install --frozen-lockfile
 
-      # When TAURI_SIGNING_PRIVATE_KEY is unset, Tauri's bundler hard-fails at
-      # the updater-signing step because `createUpdaterArtifacts: true` is set
-      # in tauri.conf.json. Override the config to disable updater artifacts
-      # for unsigned builds (first release, or any build cut before the
-      # updater key has been generated + added as a secret).
+      # Tauri's bundler is "set but empty == attempt to sign" on both platforms:
+      #   - macOS: any truthy APPLE_CERTIFICATE triggers `security import` of the
+      #     payload; empty string → "SecKeychainItemImport: invalid parameters".
+      #   - updater: createUpdaterArtifacts=true requires TAURI_SIGNING_PRIVATE_KEY;
+      #     we override the bundle config to disable artifacts when the key is
+      #     unset so pre-v0.1.0 (unsigned) releases go through cleanly.
+      # Solution: pass secrets through as `_SEC_*`-prefixed carriers and only
+      # re-export them under their canonical names when they actually have a
+      # value. No value → Tauri takes the "no signing configured" path.
       - name: Build Tauri app
-        env:
-          # --- macOS signing + notarisation (no-ops when unset) ---
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # --- Windows signing (no-ops when unset) ---
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          # --- Tauri updater signing ---
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         shell: bash
+        env:
+          # --- macOS signing + notarisation ---
+          _SEC_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          _SEC_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          _SEC_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          _SEC_APPLE_ID: ${{ secrets.APPLE_ID }}
+          _SEC_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          _SEC_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # --- Windows signing ---
+          _SEC_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          _SEC_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          # --- Tauri updater signing ---
+          _SEC_TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          _SEC_TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+          set -euo pipefail
+
+          # Promote secrets to canonical env vars only when non-empty — Tauri
+          # treats empty APPLE_CERTIFICATE as "sign this build" and fails.
+          if [ -n "${_SEC_APPLE_CERTIFICATE:-}" ]; then
+            echo "Apple signing secrets present — enabling macOS codesign + notarisation."
+            export APPLE_CERTIFICATE="$_SEC_APPLE_CERTIFICATE"
+            export APPLE_CERTIFICATE_PASSWORD="$_SEC_APPLE_CERTIFICATE_PASSWORD"
+            export APPLE_SIGNING_IDENTITY="$_SEC_APPLE_SIGNING_IDENTITY"
+            export APPLE_ID="$_SEC_APPLE_ID"
+            export APPLE_PASSWORD="$_SEC_APPLE_PASSWORD"
+            export APPLE_TEAM_ID="$_SEC_APPLE_TEAM_ID"
+          else
+            echo "Apple signing secrets unset — producing unsigned macOS build."
+          fi
+
+          if [ -n "${_SEC_WINDOWS_CERTIFICATE:-}" ]; then
+            echo "Windows signing cert present — signtool will be invoked by the bundler."
+            export WINDOWS_CERTIFICATE="$_SEC_WINDOWS_CERTIFICATE"
+            export WINDOWS_CERTIFICATE_PASSWORD="$_SEC_WINDOWS_CERTIFICATE_PASSWORD"
+          else
+            echo "Windows signing cert unset — producing unsigned Windows build."
+          fi
+
+          if [ -n "${_SEC_TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
             echo "TAURI_SIGNING_PRIVATE_KEY set — building with updater artifacts."
+            export TAURI_SIGNING_PRIVATE_KEY="$_SEC_TAURI_SIGNING_PRIVATE_KEY"
+            export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$_SEC_TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
             pnpm -C shell tauri build
           else
             echo "TAURI_SIGNING_PRIVATE_KEY unset — disabling updater artifacts for this build."
@@ -281,6 +311,11 @@ jobs:
           draft: true
           generate_release_notes: true
           fail_on_unmatched_files: false
+          # Artifact names uploaded by the build matrix:
+          #   fintrack-macos-installer   fintrack-macos-updater (optional)
+          #   fintrack-windows-installer fintrack-windows-updater (optional)
           files: |
-            artifacts/fintrack-macos/**/*
-            artifacts/fintrack-windows/**/*
+            artifacts/fintrack-macos-installer/**/*
+            artifacts/fintrack-macos-updater/**/*
+            artifacts/fintrack-windows-installer/**/*
+            artifacts/fintrack-windows-updater/**/*
