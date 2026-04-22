@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -15,6 +18,8 @@ from sidecar.api.prices import router as prices_router
 from sidecar.config import settings
 from sidecar.db.migrations_runner import upgrade_to_head
 from sidecar.db.seed import seed_default_assets
+
+PARENT_WATCHDOG_INTERVAL_SECONDS = 2.0
 
 ALLOWED_ORIGINS = [
     "http://localhost:1420",
@@ -66,11 +71,41 @@ app.include_router(assets_router)
 app.include_router(prices_router)
 
 
+def _watch_parent(initial_ppid: int) -> None:
+    while True:
+        time.sleep(PARENT_WATCHDOG_INTERVAL_SECONDS)
+        current = os.getppid()
+        if current != initial_ppid:
+            logger.warning(
+                "Parent process (pid=%d) is gone (now pid=%d); exiting",
+                initial_ppid,
+                current,
+            )
+            os._exit(0)
+
+
+def _start_parent_watchdog() -> None:
+    if os.environ.get("FINTRACK_DISABLE_PARENT_WATCHDOG") == "1":
+        return
+    initial_ppid = os.getppid()
+    if initial_ppid == 1:
+        return
+    t = threading.Thread(
+        target=_watch_parent,
+        args=(initial_ppid,),
+        name="parent-watchdog",
+        daemon=True,
+    )
+    t.start()
+    logger.info("Parent watchdog started (parent pid=%d)", initial_ppid)
+
+
 def main() -> None:
     logging.basicConfig(
         level=settings.log_level.upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    _start_parent_watchdog()
     logger.info("Starting FinTrack sidecar on 127.0.0.1:%d", settings.port)
     uvicorn.run(
         app,

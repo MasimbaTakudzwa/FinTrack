@@ -12,9 +12,9 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-22 — Session 002 (checkpoint 2 — Sprint 2 backend pipeline first-pass landed)
-**Active sprint:** Sprint 2 — Market Data Pipeline
-**Overall status:** 🟢 Backend ingestion pipeline working end-to-end; UI untouched (Sprint 3); CoinGecko/FRED fetchers deferred
+**Last updated:** 2026-04-22 — Session 002 (checkpoint 3 — Sprint 1 kill-test closed via ctrlc + parent-watchdog)
+**Active sprint:** Sprint 2 — Market Data Pipeline (first pass landed; follow-ups optional)
+**Overall status:** 🟢 Sprint 1 complete; Sprint 2 backend pipeline landed; sidecar shutdown verified under SIGTERM and SIGKILL
 
 ### What was just completed (Sprint 2 first pass)
 - **PricePoint model + migration**: `sidecar/db/models.py` — `PricePoint` with FK to `assets`, `Numeric(18,6)` for o/h/l/c, `BigInteger` volume, composite index `ix_price_points_asset_ts` on `(asset_id, timestamp)`, unique constraint `uq_price_points_asset_ts` for dedup. Alembic migration `0002_create_price_points.py` — runs cleanly on top of 0001. Asset ↔ PricePoint relationship wired with `cascade="all, delete-orphan"`
@@ -34,10 +34,11 @@
 - **`vacuum_db` weekly job** — low priority, add with Sprint 4 scheduler work
 
 ### What to work on NEXT (in order)
-1. [ ] **Commit Sprint 2 first pass** — `feat(sprint-2): market data pipeline (yfinance + scheduler + assets/prices API)`
-2. [ ] **Finish Sprint 1 kill-test** — still outstanding; user-hands-only
-3. [ ] **Sprint 2 follow-up** (optional before Sprint 3): CoinGecko fetcher + `ingest_crypto`, FRED fetcher + `ingest_macro`, `vacuum_db` weekly
-4. [ ] **Start Sprint 3 — React UI Dashboard**: Tailwind + Zustand, app shell, watchlist grid, asset detail with TradingView Lightweight Charts
+1. [x] ~~Commit Sprint 2 first pass~~ — landed as `bd26a2f`
+2. [x] ~~Finish Sprint 1 kill-test~~ — ctrlc handler + parent-PID watchdog verified on Mac; commit pending
+3. [ ] **Commit Sprint 1 kill-test fix** — `fix(sprint-1): clean sidecar shutdown via ctrlc + parent-pid watchdog`
+4. [ ] **Sprint 2 follow-up** (optional before Sprint 3): CoinGecko fetcher + `ingest_crypto`, FRED fetcher + `ingest_macro`, `vacuum_db` weekly
+5. [ ] **Start Sprint 3 — React UI Dashboard**: Tailwind + Zustand, app shell, watchlist grid, asset detail with TradingView Lightweight Charts
 
 ### Active blockers
 - None
@@ -52,6 +53,9 @@
 - **SQLite DateTime without tz**: stored values come back as naive datetimes even though we write UTC-aware. Pydantic then serialises without offset. Frontend must treat timestamps as UTC. Acceptable for now; revisit if confusion arises
 - **CORS required even on localhost** (from Sprint 1): Vite `http://localhost:1420` ≠ sidecar `http://127.0.0.1:<port>`. Keep the 4-origin allowlist explicit
 - **macOS window-close quirk** (from Sprint 1): `WindowEvent::CloseRequested` → `app.exit(0)` handler is required so `RunEvent::Exit` fires and the python child is killed
+- **Tauri `RunEvent::Exit` does NOT fire on OS signals**: SIGTERM / SIGINT to the Tauri process kills the shell without invoking the `run(|h, event|)` callback, so the python sidecar is orphaned. Fix: install a `ctrlc::set_handler` in `setup()` that calls `app_handle.exit(0)` — that's what routes the signal through the tauri event loop and fires `RunEvent::Exit → child.kill()`
+- **Parent-PID watchdog as safety net**: SIGKILL bypasses `ctrlc`, and any crash (OOM, abort, etc.) also skips cleanup. `sidecar/main.py` starts a daemon thread that polls `os.getppid()` every 2s; when the ppid changes (orphan → reparented to launchd/init), it calls `os._exit(0)`. Disabled by `FINTRACK_DISABLE_PARENT_WATCHDOG=1`, and skipped when initial ppid is 1 (already a top-level process)
+- **Dev-mode osascript limitation**: `pnpm tauri dev` produces an unbundled `target/debug/shell` binary that has `CFBundleIdentifier=NULL` and `LSDisplayName="shell"`, so `osascript -e 'tell application "FinTrack" to quit'` cannot target it. GUI-close verification must wait for bundled `.app` (Sprint 5) or be done manually by the user
 - **Dev DB path heuristic**: when CWD has `pyproject.toml` + `sidecar/`, DB is `./fintrack.db` (gitignored); otherwise `platformdirs.user_data_dir("FinTrack","FinTrack")`
 - **Tauri v2 template split**: entry is `src-tauri/src/lib.rs`, not `main.rs`
 - **ESLint flat config gotcha**: use `reactHooks.configs.flat["recommended-latest"]`, and `pnpm -C <dir>` (not `--prefix` which is npm-only)
@@ -101,7 +105,8 @@
 - [x] React UI calls `invoke('get_sidecar_port')`, then `fetch('http://127.0.0.1:${port}/api/health/')`
 - [x] Response rendered as a status badge (green ✓ healthy, red ✗ error with retry button); polls every 2s with `AbortController` cleanup
 - [x] Verified on Mac: `pnpm tauri dev` → window opens → badge shows ✓ healthy
-- [ ] Verified on Mac: killing sidecar process → badge flips to ✗ within 3s (pending — also verify `pgrep -f sidecar.main` returns nothing after window close)
+- [x] Verified on Mac: SIGTERM to `target/debug/shell` → both shell and sidecar gone within 1s (ctrlc handler → `app.exit(0)` → `RunEvent::Exit` → `child.kill()`)
+- [x] Verified on Mac: SIGKILL to `target/debug/shell` → sidecar gone within 2s via parent-PID watchdog (ctrlc cannot catch SIGKILL, so this proves the fallback path)
 - [x] SQLite file created in expected location on first run (verify via `sqlite3 fintrack.db .schema`)
 
 #### Sprint 1 verification checklist

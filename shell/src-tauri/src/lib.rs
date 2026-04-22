@@ -101,6 +101,15 @@ pub fn run() {
                 port,
                 child: Mutex::new(child),
             });
+
+            let app_handle = app.handle().clone();
+            if let Err(e) = ctrlc::set_handler(move || {
+                eprintln!("[sidecar] received termination signal, exiting");
+                app_handle.exit(0);
+            }) {
+                eprintln!("[sidecar] failed to install signal handler: {e}");
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
