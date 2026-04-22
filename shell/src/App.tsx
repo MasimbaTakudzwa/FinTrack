@@ -5,6 +5,7 @@ import { AssetDetail } from "./pages/AssetDetail";
 import { Dashboard } from "./pages/Dashboard";
 import { Macro } from "./pages/Macro";
 import { Market } from "./pages/Market";
+import { News } from "./pages/News";
 import { Settings } from "./pages/Settings";
 import { applyTheme, resolveTheme, useSettings } from "./stores/useSettings";
 
@@ -27,6 +28,7 @@ function App() {
           <Route index element={<Dashboard />} />
           <Route path="assets/:symbol" element={<AssetDetail />} />
           <Route path="market" element={<Market />} />
+          <Route path="news" element={<News />} />
           <Route path="macro" element={<Macro />} />
           <Route path="settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />

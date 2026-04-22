@@ -12,9 +12,9 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-22 — Session 003 (checkpoint 9 — Sprint 4A complete: news ingestion pipeline via Yahoo RSS)
-**Active sprint:** Sprint 4 — News, Watchlists & Desktop Alerts (4A ✅ done, 4B next)
-**Overall status:** 🟢 Sprints 1, 2 & 3 complete; Sprint 4A (news ingestion backend) complete — 162 unique articles ingested across 10 seed symbols on live smoke test
+**Last updated:** 2026-04-22 — Session 003 (checkpoint 10 — Sprint 4B complete: News UI + /news page + sidebar nav)
+**Active sprint:** Sprint 4 — News, Watchlists & Desktop Alerts (4A ✅, 4B ✅, 4C next)
+**Overall status:** 🟢 Sprints 1, 2 & 3 complete; Sprint 4A (backend news ingestion) + 4B (News UI) complete — AssetDetail sidebar + /news page both render live Yahoo RSS articles
 
 ### What was just completed (Sprint 2 first pass)
 - **PricePoint model + migration**: `sidecar/db/models.py` — `PricePoint` with FK to `assets`, `Numeric(18,6)` for o/h/l/c, `BigInteger` volume, composite index `ix_price_points_asset_ts` on `(asset_id, timestamp)`, unique constraint `uq_price_points_asset_ts` for dedup. Alembic migration `0002_create_price_points.py` — runs cleanly on top of 0001. Asset ↔ PricePoint relationship wired with `cascade="all, delete-orphan"`
@@ -67,7 +67,7 @@
 - **ingest_news job** (`sidecar/scheduler/jobs.py`): `_upsert_articles()` uses SQLite `INSERT ... ON CONFLICT(url) DO NOTHING` to dedup by URL, then `SELECT url, id` for the batch to hydrate IDs for both new + existing. `_upsert_article_assets()` inserts composite-PK pairs with `ON CONFLICT(article_id, asset_id) DO NOTHING`. Full job flow: load active symbols → `fetch_news_for_many` → map back to asset IDs → upsert articles → upsert associations. Returns `(articles_inserted, links_inserted)`. Short-circuits when no active assets.
 - **Config + settings**: new `enable_news_job: bool = True` and `ingest_news_interval_minutes: int = 15` in `sidecar/config.py`. Two new entries in `SETTINGS_SPECS` (`sidecar/services/settings.py`) — `ingest_news.enabled` (BOOL, env_attr `enable_news_job`) and `ingest_news.interval_minutes` (INT, 1–1440). Brings total mutable settings to 7.
 - **Scheduler registration** (`sidecar/scheduler/__init__.py`): `_register_jobs` gates `ingest_news` on the effective-config flag (adds or removes accordingly), uses `IntervalTrigger(minutes=config["ingest_news.interval_minutes"])` with `next_run_time=now` so the first run fires immediately on cold start / reconfigure — same pattern as prices/crypto.
-- **API** (`sidecar/api/news.py`): `GET /api/news/?symbol=&from=&to=&limit=` returns `{count, articles: [{id, url, headline, source, published_at, summary, symbols[]}]}`. Newest-first, `limit` clamped 1–1000 (default 200). Symbol filter is case-insensitive, 404 on unknown symbol. Two-query hydration: load articles for the filter, then `SELECT article_id, assets.symbol FROM article_assets JOIN assets` scoped to those article_ids, group into lists. Wired into `sidecar/main.py` via `app.include_router(news_router)`.
+- **API** (`sidecar/api/news.py`): `GET /api/news/?symbol=&from=&to=&limit=` returns `{count, articles: [{id, url, headline, source, published_at, summary, symbols[]}]}`. Newest-first, `limit` bounded 1–500 (default 50). Symbol filter is case-insensitive, 404 on unknown symbol. Two-query hydration: load articles for the filter, then `SELECT article_id, assets.symbol FROM article_assets JOIN assets` scoped to those article_ids, group into lists. Wired into `sidecar/main.py` via `app.include_router(news_router)`.
 - **Tests added** (21 new, total 102):
   - `tests/test_migrations.py`: asserts 0005 creates both tables with correct columns, composite PK, FKs, and both indexes.
   - `tests/test_rss_fetcher.py` (5): parse real-shaped RSS XML, skip entries missing critical fields, truncate 512-char headline, retry-then-raise after `MAX_ATTEMPTS`, `fetch_news_for_many` swallows per-symbol errors.
@@ -78,12 +78,22 @@
 - **Live smoke test**: ran `upgrade_to_head()` then `ingest_news()` against the worktree DB — **162 unique articles ingested, 200 (article, asset) links** (20 per symbol across all 10 seeded assets). Re-run produced 0 new articles, 0 new links — idempotent.
 - **Verifications**: `pytest` 102/102 green, `ruff check .` clean, `mypy --strict sidecar/` clean on 31 files.
 
+### What was completed (Sprint 4B — News UI)
+- **API client** (`shell/src/api/client.ts`): new `Article` + `ArticleList` TS interfaces mirroring the backend shape; `listNews({ symbol?, from?, to?, limit?, signal? })` helper that GETs `/api/news/` and returns `ArticleList`.
+- **Reusable `NewsList` component** (`shell/src/components/NewsList.tsx`): pure render of `Article[]` with loading / error / empty states. Each row shows headline (links to `article.url` in external browser via `target="_blank" rel="noopener noreferrer"` + `ExternalLink` icon), source, relative-time-ago (`just now` / `Nm ago` / `Nh ago` / `Nd ago` / `YYYY-MM-DD` for > 7d), and symbol chips that link back to `/assets/:symbol`. Supports two densities (`compact` for sidebar, `comfortable` for page) and `hideSymbol` to drop redundant chips on AssetDetail. Relative-time parser accepts both ISO-with-offset and naive-UTC strings (backend's SQLite DateTime returns naive — we coerce with trailing `Z`).
+- **AssetDetail sidebar** (`shell/src/pages/AssetDetail.tsx`): replaced `NewsPanelPlaceholder` with a real `NewsPanel` that fetches `listNews({ symbol, limit: 10 })`. Panel is keyed on `asset.symbol` so navigating between asset pages remounts it with fresh `{loading: true, articles: []}` state (cleaner than synchronously resetting state in a `useEffect`, which the new `react-hooks/set-state-in-effect` rule forbids). Header shows `Recent news` + a `See all →` link to `/news?symbol={SYMBOL}`.
+- **`/news` standalone page** (`shell/src/pages/News.tsx`): full-page news view with a symbol-filter `<select>` (All / every known asset, sorted alphabetically by symbol), a Refresh button, and a grouped list (Today / Yesterday / ISO-date sections). Filter state lives in the URL as `?symbol=AAPL` via `useSearchParams`, so the `See all →` deep-link from AssetDetail works and refresh preserves context. Article count in subheader shows the scope. Empty / error / loading handled by delegating to `NewsList`.
+- **Routing + nav**: new `/news` route in `shell/src/App.tsx`; `Newspaper` NavLink added to `Sidebar.tsx` between Market and Macro; `Header.tsx` `titleForPath` handles `/news` → `"News"`.
+- **React 19 hook rule**: `react-hooks/set-state-in-effect` (new in this ESLint config) forbids synchronous `setState` inside a `useEffect` body. Fix pattern: only call `setState` from `.then`/`.catch` handlers (or post-`await` in an async IIFE); use `key={…}` resets to force a fresh `loading: true` initial state; handle loading-on-refresh / loading-on-filter-change inside the event handlers (which are not governed by the rule).
+- **Verifications**: `pnpm -C shell lint` clean, `pnpm -C shell build` clean (444 kB JS / 140 kB gzipped — up from 437/138 with 4B additions). Backend unchanged — `pytest` still 102/102.
+
 ### What to work on NEXT (in order)
 1. [x] **Live GUI verification** — user confirmed post-fix `pnpm tauri dev` works as intended: Dashboard sparklines + AssetDetail candle chart populate on cold start, theme toggle + settings save flow all green (no regressions reported).
 2. [x] **Sprint 4A — News ingestion pipeline (backend)** — Article/ArticleAsset models, migration 0005, Yahoo RSS fetcher, ingest_news job, config + scheduler wiring, `/api/news/` endpoint, full test coverage, live smoke test with 162 articles. Done this session.
-3. [ ] **Sprint 4B — News UI**: replace the AssetDetail news-sidebar placeholder with live data; add a standalone `/news` page with filter-by-symbol and infinite scroll. Sidebar nav entry. API client additions: `listNews({ symbol, from, to, limit })`.
-4. [ ] **Sprint 4C — Watchlists**: `Watchlist` + `WatchlistItem` models (position for drag-reorder), CRUD endpoints, UI (add/remove/reorder). Dashboard pivots to reading from the default watchlist.
-5. [ ] **Sprint 4D — Price alerts + desktop notifications**: `PriceAlert` model, `check_price_alerts` job (5-min interval, reads latest `PricePoint` for each active alert), Tauri `notification` plugin wired to a sidecar→shell event bridge, alert-history UI page, alert-create modal from AssetDetail.
+3. [x] **Sprint 4B — News UI** — listNews() client helper, reusable NewsList component, AssetDetail sidebar integration, standalone /news page with URL-backed symbol filter, sidebar nav entry. Done this session.
+4. [ ] **Live GUI smoke for 4B** — run `pnpm tauri dev`, open an AssetDetail page, verify the news sidebar renders real articles, click a headline → opens in system browser, click `See all →` → lands on `/news?symbol=…` with matching filter, change filter to "All symbols" → URL updates and list refreshes, verify day-grouping labels correct.
+5. [ ] **Sprint 4C — Watchlists**: `Watchlist` + `WatchlistItem` models (position for drag-reorder), CRUD endpoints, UI (add/remove/reorder). Dashboard pivots to reading from the default watchlist.
+6. [ ] **Sprint 4D — Price alerts + desktop notifications**: `PriceAlert` model, `check_price_alerts` job (5-min interval, reads latest `PricePoint` for each active alert), Tauri `notification` plugin wired to a sidecar→shell event bridge, alert-history UI page, alert-create modal from AssetDetail.
 
 ### Active blockers
 - None
@@ -112,6 +122,7 @@
 - **`datetime(*struct_time[:6], tzinfo=UTC)` fails mypy**: unpack shape confuses the type checker into thinking `tzinfo` gets multiple values. Unpack explicitly: `datetime(val[0], val[1], val[2], val[3], val[4], val[5], tzinfo=UTC)` and include `IndexError` in the except tuple for short struct_times.
 - **Upsert-then-SELECT for SQLite without RETURNING**: to dedup `articles` by URL and hydrate IDs for both new + existing rows, run `INSERT ... ON CONFLICT(url) DO NOTHING` then `SELECT url, id WHERE url IN (...)` in the same transaction. Works for the composite-PK link table too — `ON CONFLICT(article_id, asset_id) DO NOTHING`.
 - **Yahoo RSS feed is unofficial** like yfinance. Shape observed on 2026-04-22: 20 items per symbol, `<title>/<link>/<pubDate>/<description>`, channel title `"Yahoo Finance - {SYMBOL}"`. Per-entry `source` field is rarely populated, so the fetcher falls back to the literal `"Yahoo Finance"`. Keep fetcher source-swappable against future Yahoo breakage.
+- **`react-hooks/set-state-in-effect` (React 19)**: this ESLint config's hooks plugin errors on any synchronous `setState` call inside a `useEffect` body — including `setLoading(true)` before an `await`, and even before returning a cleanup fn. Fix patterns: (a) call `setState` only from `.then`/`.catch` handlers or post-`await` in an async IIFE (state transitions happen inside handlers, not inline); (b) on prop change where you want a fresh initial state, add `key={someDep}` to remount the component; (c) for user-triggered "show loading" feedback (Refresh, filter dropdown), put the `setState` in the event handler — event handlers are NOT governed by the rule.
 - Phase 1 dev runs unsigned binaries — code signing deferred to Sprint 5
 - SQLite WAL mode mandatory — scheduler writes concurrently with UI reads
 - Sidecar never binds to 0.0.0.0 — always 127.0.0.1
@@ -228,10 +239,11 @@
 - [x] Tests: fetcher (mocked `_http_get`), job upsert/idempotency, API filter + 404 on unknown symbol, scheduler reconfigure
 
 #### Milestone 4B — News UI
-- [ ] Wire real data into the AssetDetail "Recent news" sidebar (replace Sprint 3 placeholder)
-- [ ] New `/news` standalone page with symbol filter dropdown + time-grouped list
-- [ ] Sidebar nav entry
-- [ ] Empty / error / loading states consistent with Dashboard
+- [x] Wire real data into the AssetDetail "Recent news" sidebar (replace Sprint 3 placeholder)
+- [x] New `/news` standalone page with symbol filter dropdown + time-grouped list (Today / Yesterday / date)
+- [x] Sidebar nav entry (`Newspaper` icon between Market and Macro)
+- [x] Empty / error / loading states consistent with Dashboard
+- [x] URL-backed filter state (`?symbol=AAPL`) so AssetDetail "See all" deep-link works
 
 #### Milestone 4C — Watchlists
 - [ ] `Watchlist` + `WatchlistItem` models (single-user, no user_id — `position` int for drag-reorder)

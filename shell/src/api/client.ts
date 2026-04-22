@@ -203,6 +203,43 @@ export function getMacroSeries(
   });
 }
 
+// ---------- News ----------
+
+export interface Article {
+  id: number;
+  url: string;
+  headline: string;
+  source: string;
+  published_at: string; // ISO 8601 — treat as UTC
+  summary: string | null;
+  symbols: string[];
+}
+
+export interface ArticleList {
+  count: number;
+  articles: Article[];
+}
+
+export function listNews(
+  opts: {
+    symbol?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+    signal?: AbortSignal;
+  } = {},
+): Promise<ArticleList> {
+  return apiGet<ArticleList>("/api/news/", {
+    params: {
+      symbol: opts.symbol,
+      from: opts.from,
+      to: opts.to,
+      limit: opts.limit,
+    },
+    signal: opts.signal,
+  });
+}
+
 // ---------- Config / runtime settings ----------
 
 export type SettingType = "bool" | "int" | "string" | "secret";

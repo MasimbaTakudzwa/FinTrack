@@ -1,4 +1,10 @@
-import { Activity, LineChart, Settings as SettingsIcon, TrendingUp } from "lucide-react";
+import {
+  Activity,
+  LineChart,
+  Newspaper,
+  Settings as SettingsIcon,
+  TrendingUp,
+} from "lucide-react";
 import { NavLink } from "react-router-dom";
 
 interface NavItem {
@@ -11,6 +17,7 @@ interface NavItem {
 const ITEMS: NavItem[] = [
   { to: "/", label: "Dashboard", icon: LineChart, end: true },
   { to: "/market", label: "Market", icon: TrendingUp },
+  { to: "/news", label: "News", icon: Newspaper },
   { to: "/macro", label: "Macro", icon: Activity },
   { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];
