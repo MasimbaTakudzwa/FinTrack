@@ -12,9 +12,9 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-22 — Session 002 (checkpoint 3 — Sprint 1 kill-test closed via ctrlc + parent-watchdog)
-**Active sprint:** Sprint 2 — Market Data Pipeline (first pass landed; follow-ups optional)
-**Overall status:** 🟢 Sprint 1 complete; Sprint 2 backend pipeline landed; sidecar shutdown verified under SIGTERM and SIGKILL
+**Last updated:** 2026-04-22 — Session 002 (checkpoint 4 — Sprint 2 closed with CoinGecko + FRED + macro API)
+**Active sprint:** Sprint 3 — React UI Dashboard
+**Overall status:** 🟢 Sprints 1 & 2 complete (backend pipeline end-to-end with 3 data sources); starting frontend work
 
 ### What was just completed (Sprint 2 first pass)
 - **PricePoint model + migration**: `sidecar/db/models.py` — `PricePoint` with FK to `assets`, `Numeric(18,6)` for o/h/l/c, `BigInteger` volume, composite index `ix_price_points_asset_ts` on `(asset_id, timestamp)`, unique constraint `uq_price_points_asset_ts` for dedup. Alembic migration `0002_create_price_points.py` — runs cleanly on top of 0001. Asset ↔ PricePoint relationship wired with `cascade="all, delete-orphan"`
@@ -27,18 +27,26 @@
 - **Live verification**: one-shot `ingest_prices()` against Yahoo → 714 bars pulled for the 10 seed assets, `/api/prices/AAPL/?limit=3` returned 5-minute OHLCV bars as expected. Unique constraint prevents duplicate inserts on re-run
 - Verifications: `pytest` 21/21 green, `ruff check .` clean, `mypy --strict sidecar/` clean on 20 files
 
-### What was deferred from Sprint 2 (next pass)
-- **`ingestion/coingecko_fetcher.py`** — Yahoo already covers crypto via `BTC-USD`/`ETH-USD`/`SOL-USD`, so a dedicated CoinGecko path is a fallback/complement, not critical path
-- **`ingestion/fred_fetcher.py` + `ingest_macro` job** — needs `FRED_API_KEY`; gated until the user provisions one
-- **`ingest_crypto` job** — same reasoning as CoinGecko; current `ingest_prices` already ingests crypto symbols alongside stocks
+### What was also completed (Sprint 2 close — `afe3170`)
+- **CoinGecko fetcher + `ingest_crypto`**: `sidecar/ingestion/coingecko_fetcher.py` with `SYMBOL_TO_COINGECKO_ID` map (BTC-USD→bitcoin, ETH-USD→ethereum, SOL-USD→solana, +7 others), `/coins/{id}/ohlc` endpoint, 429-aware retry, emits `PriceBar(volume=0)` (OHLC endpoint has no volume). Gated by `FINTRACK_ENABLE_CRYPTO_JOB` (default false — yfinance still handles crypto by default). When disabled, the scheduler removes the job on next start.
+- **FRED fetcher + `ingest_macro`**: `sidecar/ingestion/fred_fetcher.py` — hits `/fred/series/observations`, strips the "." missing-value sentinel, swallows per-series failures in `fetch_macro_series_many`. Job auto-skips when `FINTRACK_FRED_API_KEY` is unset; when set, runs as a daily cron (`ingest_macro_cron_hour`, default 06:00 UTC).
+- **Macro data model**: `MacroIndicator` (series_id unique, name/description/units/frequency, is_active) + `MacroDataPoint` (indicator_id FK cascade, date, Numeric(20,6) value, unique `(indicator_id, date)`). Alembic `0003_create_macro.py` on top of 0002.
+- **Macro seed**: `DEFAULT_MACRO_INDICATORS` = CPIAUCSL, UNRATE, FEDFUNDS, DGS10, GDP. `seed_all_defaults()` wraps assets + macro seeding; lifespan runs both on startup.
+- **Macro API**: `GET /api/macro/?active_only=true` + `GET /api/macro/{series_id}/?from=&to=&limit=500`, case-insensitive symbol lookup, 404 on unknown, ascending time order. Pydantic v2 with `ConfigDict(from_attributes=True)`.
+- **Verifications**: `pytest` 51/51 green, `ruff check .` clean, `mypy --strict sidecar/` clean on 24 files. Live smoke: sidecar runs through migrations 0001→0003, `/api/macro/` returns the 5 seeded indicators, `/api/macro/NOPE/` → 404
+
+### Still deferred (out of Sprint 2 by choice)
 - **`vacuum_db` weekly job** — low priority, add with Sprint 4 scheduler work
 
 ### What to work on NEXT (in order)
-1. [x] ~~Commit Sprint 2 first pass~~ — landed as `bd26a2f`
-2. [x] ~~Finish Sprint 1 kill-test~~ — ctrlc handler + parent-PID watchdog verified on Mac; commit pending
-3. [ ] **Commit Sprint 1 kill-test fix** — `fix(sprint-1): clean sidecar shutdown via ctrlc + parent-pid watchdog`
-4. [ ] **Sprint 2 follow-up** (optional before Sprint 3): CoinGecko fetcher + `ingest_crypto`, FRED fetcher + `ingest_macro`, `vacuum_db` weekly
-5. [ ] **Start Sprint 3 — React UI Dashboard**: Tailwind + Zustand, app shell, watchlist grid, asset detail with TradingView Lightweight Charts
+1. [x] ~~Sprint 2 follow-ups~~ — landed as `afe3170`
+2. [ ] **Sprint 3 — React UI Dashboard**
+   - 3A: Tailwind + Zustand + typed API client wired into `shell/src/`
+   - 3B: App shell (sidebar nav, header, router, dark-mode toggle)
+   - 3C: Dashboard page — watchlist grid with sparklines + day change %
+   - 3D: Asset detail page — TradingView Lightweight Charts + price panel
+   - 3E: Market overview (top movers, sector heatmap — minimal)
+   - 3F: Settings page (data-source toggles, refresh intervals, DB path)
 
 ### Active blockers
 - None
@@ -124,18 +132,19 @@
 **Scope:** Phase 1
 
 #### Tasks (refine at Sprint 2 start)
-- [x] `sidecar/db/models.py` — `Asset`, `PricePoint` SQLAlchemy models (composite index on `asset_id, timestamp`)
-- [x] Alembic migration for `price_points`
+- [x] `sidecar/db/models.py` — `Asset`, `PricePoint`, `MacroIndicator`, `MacroDataPoint` SQLAlchemy models
+- [x] Alembic migration for `price_points` (0002), `macro_*` (0003)
 - [x] `sidecar/ingestion/yfinance_fetcher.py` — batched `yf.download`, exponential backoff
-- [ ] `sidecar/ingestion/coingecko_fetcher.py` — top 10 crypto OHLCV (deferred — Yahoo covers crypto for now)
-- [ ] `sidecar/ingestion/fred_fetcher.py` — macro indicators (deferred — needs `FRED_API_KEY`)
+- [x] `sidecar/ingestion/coingecko_fetcher.py` — top 10 crypto OHLC via `/coins/{id}/ohlc`
+- [x] `sidecar/ingestion/fred_fetcher.py` — macro observations via FRED observations endpoint
 - [x] `sidecar/scheduler/__init__.py` — APScheduler `BackgroundScheduler` + `SQLAlchemyJobStore`, misfire grace 60s
 - [x] `sidecar/scheduler/jobs.py` — `ingest_prices` (5 min covering stocks/ETFs/crypto via yfinance)
-- [ ] `sidecar/scheduler/jobs.py` — `ingest_crypto` (5 min via CoinGecko — deferred)
-- [ ] `sidecar/scheduler/jobs.py` — `ingest_macro` (daily 06:00 via FRED — deferred)
+- [x] `sidecar/scheduler/jobs.py` — `ingest_crypto` (15 min via CoinGecko, opt-in via `FINTRACK_ENABLE_CRYPTO_JOB`)
+- [x] `sidecar/scheduler/jobs.py` — `ingest_macro` (daily 06:00 UTC via FRED, no-op without `FRED_API_KEY`)
 - [x] `GET /api/assets/` — list tracked assets
 - [x] `GET /api/prices/{symbol}/?from=&to=&limit=` — last N price points with date filter
-- [x] Seed script: 10 default assets (AAPL, MSFT, GOOGL, NVDA, SPY, QQQ, GLD, BTC-USD, ETH-USD, SOL-USD)
+- [x] `GET /api/macro/`, `GET /api/macro/{series_id}/?from=&to=&limit=` — macro indicator + series endpoints
+- [x] Seed script: 10 default assets + 5 default macro indicators (CPIAUCSL, UNRATE, FEDFUNDS, DGS10, GDP)
 
 #### Sprint 2 verification checklist
 - [x] `pytest` — 21/21 tests pass (migrations, seed, API assets/prices, yfinance fetcher normalization, ingest_prices job upsert/idempotency)
