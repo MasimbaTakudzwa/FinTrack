@@ -18,6 +18,7 @@ import {
   listAlerts,
   updateAlert,
 } from "../api/client";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 
 type Filter = "all" | "active" | "triggered";
 
@@ -63,6 +64,7 @@ export function Alerts() {
   const [state, setState] = useState<State>(INITIAL);
   const [filter, setFilter] = useState<Filter>("all");
   const [busyIds, setBusyIds] = useState<Set<number>>(new Set());
+  const [pendingDelete, setPendingDelete] = useState<PriceAlert | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -141,10 +143,14 @@ export function Alerts() {
       .finally(() => markBusy(a.id, false));
   };
 
-  const removeAlert = (a: PriceAlert) => {
-    if (!window.confirm(`Delete alert for ${a.symbol} ${a.direction} ${fmtThreshold(a)}?`)) {
-      return;
-    }
+  const requestDelete = (a: PriceAlert) => {
+    setPendingDelete(a);
+  };
+
+  const confirmDelete = () => {
+    const a = pendingDelete;
+    if (!a) return;
+    setPendingDelete(null);
     markBusy(a.id, true);
     deleteAlert(a.id)
       .then(() => {
@@ -154,7 +160,10 @@ export function Alerts() {
         }));
       })
       .catch((err: unknown) => {
-        console.error("delete alert failed:", err);
+        setState((s) => ({
+          ...s,
+          error: err instanceof Error ? err.message : String(err),
+        }));
       })
       .finally(() => markBusy(a.id, false));
   };
@@ -330,7 +339,7 @@ export function Alerts() {
                         )}
                         <button
                           type="button"
-                          onClick={() => removeAlert(a)}
+                          onClick={() => requestDelete(a)}
                           disabled={busy}
                           title="Delete"
                           className="rounded border border-rose-200 bg-white p-1 text-rose-500 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-900 dark:bg-zinc-900 dark:text-rose-400 dark:hover:bg-rose-950"
@@ -352,6 +361,20 @@ export function Alerts() {
           No alerts match the <span className="font-medium">{filter}</span> filter.
         </div>
       )}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete alert?"
+        message={
+          pendingDelete
+            ? `Delete the ${pendingDelete.direction} ${fmtThreshold(pendingDelete)} alert on ${pendingDelete.symbol}? This cannot be undone.`
+            : ""
+        }
+        confirmLabel="Delete"
+        destructive
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }

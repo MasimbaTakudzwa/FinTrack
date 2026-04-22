@@ -23,6 +23,11 @@ interface State {
 
 const INITIAL: State = { rows: [], loading: true, error: null };
 
+// 5-min bars × 288 ≈ 24 hours of intraday data. Enough to make the rolling 24h
+// change meaningful even when the latest two bars are flat (off-hours etc.).
+const CHANGE_WINDOW_BARS = 300;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
 function fmtPrice(n: number): string {
   if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
   if (n >= 1) return n.toFixed(2);
@@ -34,14 +39,40 @@ function fmtPct(pct: number): string {
   return `${sign}${pct.toFixed(2)}%`;
 }
 
+/**
+ * Compute "recent change %" for the movers board.
+ *
+ * Previously this was (last close − previous close) / previous close, but with
+ * 5-min bars that window is so short that two adjacent closes are often
+ * identical (weekends, pre/post-market) and every asset ends up excluded from
+ * both gainers and losers.
+ *
+ * Now: find the oldest bar whose timestamp is within the last 24h; compute
+ * change relative to that close. Falls back to the oldest bar in the window
+ * when the data doesn't span 24h yet (fresh install).
+ */
 function toRow(asset: Asset, series: PriceSeries): MoverRow {
-  const closes = series.points.map((p) => Number(p.close));
-  const lastClose = closes.length > 0 ? closes[closes.length - 1] : null;
-  let changePct: number | null = null;
-  if (closes.length >= 2) {
-    const prev = closes[closes.length - 2];
-    if (prev) changePct = ((closes[closes.length - 1] - prev) / prev) * 100;
+  const pts = series.points;
+  if (pts.length === 0) return { asset, lastClose: null, changePct: null };
+  const lastClose = Number(pts[pts.length - 1].close);
+  if (pts.length < 2) return { asset, lastClose, changePct: null };
+
+  const nowMs = Date.now();
+  const cutoffMs = nowMs - ONE_DAY_MS;
+  let anchorIdx = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const tsIso = pts[i].timestamp;
+    // SQLite returns naive datetimes — coerce to UTC for a consistent parse.
+    const normalised = /[zZ]|[+-]\d{2}:?\d{2}$/.test(tsIso) ? tsIso : `${tsIso}Z`;
+    const t = Date.parse(normalised);
+    if (!Number.isNaN(t) && t >= cutoffMs) {
+      anchorIdx = i;
+      break;
+    }
   }
+  const anchor = Number(pts[anchorIdx].close);
+  if (!anchor) return { asset, lastClose, changePct: null };
+  const changePct = ((lastClose - anchor) / anchor) * 100;
   return { asset, lastClose, changePct };
 }
 
@@ -51,7 +82,10 @@ async function loadRows(signal: AbortSignal): Promise<MoverRow[]> {
   await Promise.all(
     assets.map(async (a) => {
       try {
-        const series = await getPriceSeries(a.symbol, { limit: 2, signal });
+        const series = await getPriceSeries(a.symbol, {
+          limit: CHANGE_WINDOW_BARS,
+          signal,
+        });
         rows.push(toRow(a, series));
       } catch {
         rows.push({ asset: a, lastClose: null, changePct: null });
@@ -120,7 +154,9 @@ export function Market() {
             Market overview
           </h2>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            {state.loading ? "Loading…" : `${state.rows.length} tracked assets`}
+            {state.loading
+              ? "Loading…"
+              : `${state.rows.length} tracked assets · change vs. 24h earlier`}
           </p>
         </div>
         <button

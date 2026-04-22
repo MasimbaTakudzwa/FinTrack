@@ -38,6 +38,7 @@ import {
   reorderWatchlistItems,
   updateWatchlist,
 } from "../api/client";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 
 interface State {
   watchlists: WatchlistSummary[];
@@ -63,6 +64,10 @@ export function Watchlists() {
   const [showNewForm, setShowNewForm] = useState(false);
   const [newName, setNewName] = useState("");
   const [renameValue, setRenameValue] = useState<string | null>(null);
+  // Separate from busy so the confirm dialog isn't blocked by a pending select.
+  const [pendingDelete, setPendingDelete] = useState<WatchlistSummary | null>(
+    null,
+  );
 
   const refreshLists = useCallback(
     async (selectId?: number | null, signal?: AbortSignal) => {
@@ -147,20 +152,24 @@ export function Watchlists() {
     }
   };
 
-  const onDelete = async (id: number) => {
-    const target = state.watchlists.find((w) => w.id === id);
-    if (!target) return;
-    if (target.is_default) {
+  const requestDelete = (wl: WatchlistSummary) => {
+    if (wl.is_default) {
       setState((s) => ({
         ...s,
         error: "Cannot delete the default watchlist — promote another first.",
       }));
       return;
     }
-    if (!window.confirm(`Delete watchlist "${target.name}"?`)) return;
+    setPendingDelete(wl);
+  };
+
+  const confirmDelete = async () => {
+    const target = pendingDelete;
+    if (!target) return;
+    setPendingDelete(null);
     setBusy(true);
     try {
-      await deleteWatchlist(id);
+      await deleteWatchlist(target.id);
       await refreshLists(null);
     } catch (err) {
       setState((s) => ({
@@ -361,7 +370,7 @@ export function Watchlists() {
                       setRenameValue(w.name);
                       setState((s) => ({ ...s, selectedId: w.id }));
                     }}
-                    onDelete={() => onDelete(w.id)}
+                    onDelete={() => requestDelete(w)}
                     busy={busy}
                   />
                 </li>
@@ -392,6 +401,20 @@ export function Watchlists() {
           )}
         </main>
       </div>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete watchlist?"
+        message={
+          pendingDelete
+            ? `Delete "${pendingDelete.name}"? Items on the list are unlinked but the underlying assets stay in your library.`
+            : ""
+        }
+        confirmLabel="Delete"
+        destructive
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }
@@ -483,19 +506,20 @@ function WatchlistRow({
           {wl.item_count}
         </span>
       </button>
-      <div className="flex opacity-0 transition-opacity group-hover:opacity-100">
-        {!wl.is_default && (
-          <button
-            type="button"
-            onClick={onPromote}
-            disabled={busy}
-            aria-label="Set as default"
-            className={`p-1 ${iconCls}`}
-            title="Set as default"
-          >
-            <Star className="h-3.5 w-3.5" />
-          </button>
-        )}
+      {/* Action strip is always rendered — hover-only used to hide the delete
+          button entirely, which made the feature look broken. On the default
+          watchlist the delete/promote buttons are disabled with a tooltip. */}
+      <div className="flex">
+        <button
+          type="button"
+          onClick={onPromote}
+          disabled={busy || wl.is_default}
+          aria-label={wl.is_default ? "Already default" : "Set as default"}
+          title={wl.is_default ? "Already the default" : "Set as default"}
+          className={`p-1 disabled:cursor-not-allowed disabled:opacity-40 ${iconCls}`}
+        >
+          <Star className="h-3.5 w-3.5" />
+        </button>
         <button
           type="button"
           onClick={onStartRename}
@@ -506,18 +530,20 @@ function WatchlistRow({
         >
           <Pencil className="h-3.5 w-3.5" />
         </button>
-        {!wl.is_default && (
-          <button
-            type="button"
-            onClick={onDelete}
-            disabled={busy}
-            aria-label="Delete"
-            className={`p-1 ${iconCls}`}
-            title="Delete"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={busy || wl.is_default}
+          aria-label={wl.is_default ? "Cannot delete default" : "Delete"}
+          title={
+            wl.is_default
+              ? "Cannot delete the default — promote another first"
+              : "Delete"
+          }
+          className={`p-1 disabled:cursor-not-allowed disabled:opacity-40 ${iconCls}`}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
       </div>
     </div>
   );
