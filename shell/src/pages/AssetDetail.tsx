@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   ArrowDownRight,
@@ -6,8 +6,10 @@ import {
   ArrowUpRight,
   Bell,
   Minus,
+  MousePointerClick,
   Newspaper,
   RefreshCw,
+  X,
 } from "lucide-react";
 import {
   type Article,
@@ -16,6 +18,7 @@ import {
   type PricePoint,
   type PriceSeries,
   getPriceSeries,
+  listAlerts,
   listAssets,
   listNews,
 } from "../api/client";
@@ -40,10 +43,23 @@ const INITIAL: State = {
   notFound: false,
 };
 
+// Max bars to pull from the API. 5-min bars × ~42 hours worth of coverage
+// for a brand-new install; settles higher as scheduler runs accumulate.
+// yfinance 5-min history tops out ~60 days, so this is also a soft ceiling.
+const MAX_BARS = 3000;
+
 function fmtPrice(n: number): string {
   if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
   if (n >= 1) return n.toFixed(2);
   return n.toFixed(4);
+}
+
+function fmtDelta(n: number): string {
+  const sign = n > 0 ? "+" : "";
+  if (Math.abs(n) >= 1000)
+    return `${sign}${n.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  if (Math.abs(n) >= 1) return `${sign}${n.toFixed(2)}`;
+  return `${sign}${n.toFixed(4)}`;
 }
 
 function fmtVolume(n: number): string {
@@ -66,6 +82,23 @@ function latestChange(points: PricePoint[]): number | null {
   return ((last - prev) / prev) * 100;
 }
 
+/**
+ * SQLite returns naive datetimes — coerce to UTC for a consistent parse.
+ * Used to turn ``timestamp`` strings on PricePoint into unix-millis.
+ */
+function parseBarMs(iso: string): number {
+  const normalised = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`;
+  return Date.parse(normalised);
+}
+
+function tone(dir: "up" | "down" | "flat"): string {
+  return {
+    up: "text-emerald-600 dark:text-emerald-400",
+    down: "text-rose-600 dark:text-rose-400",
+    flat: "text-zinc-500 dark:text-zinc-400",
+  }[dir];
+}
+
 export function AssetDetail() {
   const { symbol } = useParams<{ symbol: string }>();
   const [state, setState] = useState<State>(INITIAL);
@@ -80,12 +113,7 @@ export function AssetDetail() {
       try {
         const [assets, series] = await Promise.all([
           listAssets({ activeOnly: false, signal: controller.signal }),
-          getPriceSeries(symbol, { limit: 500, signal: controller.signal }).catch(
-            (e: unknown) => {
-              // 404 here means the symbol is valid but has no asset record — treat as notFound later
-              throw e;
-            },
-          ),
+          getPriceSeries(symbol, { limit: MAX_BARS, signal: controller.signal }),
         ]);
         const asset = assets.find(
           (a) => a.symbol.toUpperCase() === symbol.toUpperCase(),
@@ -170,6 +198,71 @@ export function AssetDetail() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Timeframes
+// ---------------------------------------------------------------------------
+
+type TimeframeId = "1H" | "4H" | "1D" | "3D" | "1W" | "ALL";
+
+interface Timeframe {
+  id: TimeframeId;
+  label: string;
+  /** Window length in ms, or null for "all". */
+  windowMs: number | null;
+  title: string;
+}
+
+const TIMEFRAMES: Timeframe[] = [
+  { id: "1H", label: "1H", windowMs: 60 * 60 * 1000, title: "Last 1 hour" },
+  { id: "4H", label: "4H", windowMs: 4 * 60 * 60 * 1000, title: "Last 4 hours" },
+  { id: "1D", label: "1D", windowMs: 24 * 60 * 60 * 1000, title: "Last 24 hours" },
+  { id: "3D", label: "3D", windowMs: 3 * 24 * 60 * 60 * 1000, title: "Last 3 days" },
+  { id: "1W", label: "1W", windowMs: 7 * 24 * 60 * 60 * 1000, title: "Last 7 days" },
+  { id: "ALL", label: "All", windowMs: null, title: "All available bars" },
+];
+
+function sliceToTimeframe(points: PricePoint[], tf: Timeframe): PricePoint[] {
+  if (!tf.windowMs || points.length === 0) return points;
+  const lastMs = parseBarMs(points[points.length - 1].timestamp);
+  const cutoff = lastMs - tf.windowMs;
+  // Binary search would be faster but 3000 bars is fine with .findIndex.
+  const firstIdx = points.findIndex((p) => parseBarMs(p.timestamp) >= cutoff);
+  if (firstIdx <= 0) return points;
+  return points.slice(firstIdx);
+}
+
+// ---------------------------------------------------------------------------
+// Measurement
+// ---------------------------------------------------------------------------
+
+interface MeasurePoint {
+  /** UTC seconds (the chart's Time type). */
+  time: number;
+  price: number;
+}
+
+interface MeasureState {
+  first: MeasurePoint | null;
+  second: MeasurePoint | null;
+}
+
+const MEASURE_EMPTY: MeasureState = { first: null, second: null };
+
+function fmtDuration(ms: number): string {
+  const s = Math.round(Math.abs(ms) / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = m / 60;
+  if (h < 24) return `${h.toFixed(h < 10 ? 1 : 0)}h`;
+  const d = h / 24;
+  return `${d.toFixed(d < 10 ? 1 : 0)}d`;
+}
+
+// ---------------------------------------------------------------------------
+// Body
+// ---------------------------------------------------------------------------
+
 function AssetBody({
   asset,
   series,
@@ -183,16 +276,36 @@ function AssetBody({
   const [lastCreatedAlert, setLastCreatedAlert] = useState<PriceAlert | null>(
     null,
   );
-  const last = series.points[series.points.length - 1];
+  const [tfId, setTfId] = useState<TimeframeId>("1D");
+  const [measure, setMeasure] = useState<MeasureState>(MEASURE_EMPTY);
+
+  const tf = TIMEFRAMES.find((t) => t.id === tfId) ?? TIMEFRAMES[TIMEFRAMES.length - 1];
+  const visiblePoints = useMemo(
+    () => sliceToTimeframe(series.points, tf),
+    [series.points, tf],
+  );
+
+  const last = visiblePoints[visiblePoints.length - 1];
   const lastClose = last ? Number(last.close) : null;
-  const changePct = latestChange(series.points);
+  const changePct = latestChange(visiblePoints);
   const dir: "up" | "down" | "flat" =
     changePct === null ? "flat" : changePct > 0 ? "up" : changePct < 0 ? "down" : "flat";
-  const tone = {
-    up: "text-emerald-600 dark:text-emerald-400",
-    down: "text-rose-600 dark:text-rose-400",
-    flat: "text-zinc-500 dark:text-zinc-400",
-  }[dir];
+
+  const onPickTf = (id: TimeframeId) => {
+    setTfId(id);
+    // Invalidating measurements on timeframe change avoids stale markers
+    // that may not even be in the visible slice anymore.
+    setMeasure(MEASURE_EMPTY);
+  };
+
+  const onChartClick = useCallback((p: MeasurePoint) => {
+    setMeasure((m) => {
+      if (m.first === null) return { first: p, second: null };
+      if (m.second === null) return { ...m, second: p };
+      // Third click → start a new measurement pair.
+      return { first: p, second: null };
+    });
+  }, []);
 
   return (
     <div className="space-y-4">
@@ -221,7 +334,7 @@ function AssetBody({
             <div className="text-3xl font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-zinc-100">
               {lastClose === null ? "—" : fmtPrice(lastClose)}
             </div>
-            <div className={`mt-0.5 inline-flex items-center gap-1 text-sm font-semibold ${tone}`}>
+            <div className={`mt-0.5 inline-flex items-center gap-1 text-sm font-semibold ${tone(dir)}`}>
               {dir === "up" && <ArrowUpRight className="h-4 w-4" />}
               {dir === "down" && <ArrowDownRight className="h-4 w-4" />}
               {dir === "flat" && <Minus className="h-4 w-4" />}
@@ -254,19 +367,54 @@ function AssetBody({
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
-          {series.count === 0 ? (
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <TimeframePicker selected={tfId} onPick={onPickTf} />
+            <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
+              <MousePointerClick className="h-3 w-3" />
+              Click two points to measure
+            </div>
+          </div>
+
+          {visiblePoints.length === 0 ? (
             <div className="flex h-[380px] items-center justify-center text-sm text-zinc-500 dark:text-zinc-400">
-              No bars available for {asset.symbol} yet.
+              No bars in this window. Try &ldquo;All&rdquo;.
             </div>
           ) : (
-            <CandleChart points={series.points} dark={dark} />
+            <CandleChart
+              points={visiblePoints}
+              dark={dark}
+              measure={{
+                first: measure.first
+                  ? {
+                      time: measure.first.time as never,
+                      price: measure.first.price,
+                    }
+                  : null,
+                second: measure.second
+                  ? {
+                      time: measure.second.time as never,
+                      price: measure.second.price,
+                    }
+                  : null,
+                onClick: onChartClick,
+              }}
+            />
           )}
+
+          <MeasureReadout
+            measure={measure}
+            onClear={() => setMeasure(MEASURE_EMPTY)}
+          />
+
           <div className="mt-2 flex items-center justify-between text-[11px] text-zinc-400 dark:text-zinc-500">
-            <span>{series.count} bars</span>
-            {series.points.length > 0 && (
+            <span>
+              {visiblePoints.length} bar{visiblePoints.length === 1 ? "" : "s"} ·{" "}
+              {tf.title}
+            </span>
+            {visiblePoints.length > 0 && (
               <span>
-                {series.points[0].timestamp.replace("T", " ").slice(0, 16)} →{" "}
-                {series.points[series.points.length - 1].timestamp
+                {visiblePoints[0].timestamp.replace("T", " ").slice(0, 16)} →{" "}
+                {visiblePoints[visiblePoints.length - 1].timestamp
                   .replace("T", " ")
                   .slice(0, 16)}{" "}
                 UTC
@@ -276,15 +424,409 @@ function AssetBody({
         </div>
 
         <aside className="flex flex-col gap-4">
-          <PricePanel last={last} />
           <NewsPanel key={asset.symbol} symbol={asset.symbol} />
         </aside>
+      </div>
+
+      <PerformancePanel allPoints={series.points} />
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <StatsPanel points={visiblePoints} tfTitle={tf.title} last={last} />
+        <AlertsForAssetPanel
+          assetId={asset.id}
+          symbol={asset.symbol}
+          lastCreatedId={lastCreatedAlert?.id ?? null}
+          onCreate={() => setAlertOpen(true)}
+        />
+        <LatestBarPanel last={last} />
       </div>
     </div>
   );
 }
 
-function PricePanel({ last }: { last: PricePoint | undefined }) {
+// ---------------------------------------------------------------------------
+// Timeframe picker
+// ---------------------------------------------------------------------------
+
+function TimeframePicker({
+  selected,
+  onPick,
+}: {
+  selected: TimeframeId;
+  onPick: (id: TimeframeId) => void;
+}) {
+  return (
+    <div className="inline-flex rounded-md border border-zinc-200 p-0.5 dark:border-zinc-800">
+      {TIMEFRAMES.map((tf) => (
+        <button
+          key={tf.id}
+          type="button"
+          onClick={() => onPick(tf.id)}
+          title={tf.title}
+          className={[
+            "rounded-sm px-2.5 py-1 text-[11px] font-semibold transition-colors",
+            selected === tf.id
+              ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+              : "text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800",
+          ].join(" ")}
+        >
+          {tf.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Measure readout
+// ---------------------------------------------------------------------------
+
+function MeasureReadout({
+  measure,
+  onClear,
+}: {
+  measure: MeasureState;
+  onClear: () => void;
+}) {
+  if (!measure.first) return null;
+  const { first, second } = measure;
+  if (!second) {
+    return (
+      <div className="mt-3 flex items-center justify-between rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs dark:border-indigo-900 dark:bg-indigo-950/60">
+        <span className="text-indigo-700 dark:text-indigo-300">
+          <span className="font-mono font-semibold">A</span> set at{" "}
+          {fmtPrice(first.price)}. Click a second point to measure.
+        </span>
+        <button
+          type="button"
+          onClick={onClear}
+          className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-700 hover:underline dark:text-indigo-300"
+        >
+          <X className="h-3 w-3" /> Clear
+        </button>
+      </div>
+    );
+  }
+
+  const delta = second.price - first.price;
+  const pct = first.price ? (delta / first.price) * 100 : null;
+  const durMs = (second.time - first.time) * 1000;
+  const isUp = delta >= 0;
+  const toneCls = isUp
+    ? "text-emerald-700 dark:text-emerald-300 border-emerald-300 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/60"
+    : "text-rose-700 dark:text-rose-300 border-rose-300 bg-rose-50 dark:border-rose-900 dark:bg-rose-950/60";
+
+  return (
+    <div
+      className={`mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border px-3 py-2 text-xs ${toneCls}`}
+    >
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 font-mono tabular-nums">
+        <span>
+          <span className="font-semibold">A</span> {fmtPrice(first.price)}
+        </span>
+        <span>
+          <span className="font-semibold">B</span> {fmtPrice(second.price)}
+        </span>
+        <span>
+          Δ {fmtDelta(delta)}
+          {pct !== null && <> ({fmtPct(pct)})</>}
+        </span>
+        <span>over {fmtDuration(durMs)}</span>
+      </div>
+      <button
+        type="button"
+        onClick={onClear}
+        className="inline-flex items-center gap-1 text-[11px] font-medium hover:underline"
+      >
+        <X className="h-3 w-3" /> Clear
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Performance panel — % change across time windows
+// ---------------------------------------------------------------------------
+
+interface PerfBucket {
+  id: string;
+  label: string;
+  windowMs: number;
+}
+
+const PERF_BUCKETS: PerfBucket[] = [
+  { id: "15m", label: "15m", windowMs: 15 * 60 * 1000 },
+  { id: "1h", label: "1h", windowMs: 60 * 60 * 1000 },
+  { id: "4h", label: "4h", windowMs: 4 * 60 * 60 * 1000 },
+  { id: "1d", label: "1d", windowMs: 24 * 60 * 60 * 1000 },
+  { id: "3d", label: "3d", windowMs: 3 * 24 * 60 * 60 * 1000 },
+  { id: "1w", label: "1w", windowMs: 7 * 24 * 60 * 60 * 1000 },
+];
+
+function PerformancePanel({ allPoints }: { allPoints: PricePoint[] }) {
+  if (allPoints.length === 0) return null;
+  const lastPt = allPoints[allPoints.length - 1];
+  const lastPrice = Number(lastPt.close);
+  const lastMs = parseBarMs(lastPt.timestamp);
+
+  const rows = PERF_BUCKETS.map((b) => {
+    const cutoff = lastMs - b.windowMs;
+    const anchor = allPoints.find((p) => parseBarMs(p.timestamp) >= cutoff);
+    if (!anchor) return { ...b, pct: null, available: false };
+    const anchorPrice = Number(anchor.close);
+    if (!anchorPrice) return { ...b, pct: null, available: true };
+    return {
+      ...b,
+      pct: ((lastPrice - anchorPrice) / anchorPrice) * 100,
+      available: true,
+    };
+  });
+  // Also compute "All" — from the oldest bar we have.
+  const oldest = Number(allPoints[0].close);
+  const allPct =
+    oldest && allPoints.length > 1 ? ((lastPrice - oldest) / oldest) * 100 : null;
+
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+        Performance
+      </h3>
+      <dl className="mt-3 grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-7">
+        {rows.map((r) => (
+          <PerfCell key={r.id} label={r.label} pct={r.pct} />
+        ))}
+        <PerfCell label="All" pct={allPct} />
+      </dl>
+    </div>
+  );
+}
+
+function PerfCell({ label, pct }: { label: string; pct: number | null }) {
+  const dir: "up" | "down" | "flat" =
+    pct === null ? "flat" : pct > 0 ? "up" : pct < 0 ? "down" : "flat";
+  return (
+    <div className="rounded-md bg-zinc-50 p-3 dark:bg-zinc-900">
+      <dt className="text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+        {label}
+      </dt>
+      <dd
+        className={`mt-0.5 text-sm font-semibold tabular-nums ${tone(dir)}`}
+      >
+        {pct === null ? "—" : fmtPct(pct)}
+      </dd>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Stats panel — high/low/avg vol for the selected window
+// ---------------------------------------------------------------------------
+
+function StatsPanel({
+  points,
+  tfTitle,
+  last,
+}: {
+  points: PricePoint[];
+  tfTitle: string;
+  last: PricePoint | undefined;
+}) {
+  if (points.length === 0) {
+    return (
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+          Stats
+        </h3>
+        <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">—</p>
+      </div>
+    );
+  }
+  let high = -Infinity;
+  let low = Infinity;
+  let volSum = 0;
+  for (const p of points) {
+    const h = Number(p.high);
+    const l = Number(p.low);
+    if (h > high) high = h;
+    if (l < low) low = l;
+    volSum += p.volume;
+  }
+  const avgVol = volSum / points.length;
+  const rangePct = low ? ((high - low) / low) * 100 : null;
+  const firstClose = Number(points[0].close);
+  const lastClose = last ? Number(last.close) : firstClose;
+  const windowChange = firstClose
+    ? ((lastClose - firstClose) / firstClose) * 100
+    : null;
+
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+        Stats <span className="ml-1 font-normal normal-case text-zinc-400 dark:text-zinc-500">· {tfTitle.toLowerCase()}</span>
+      </h3>
+      <dl className="mt-3 grid grid-cols-2 gap-y-2 text-sm">
+        <Stat label="High" value={fmtPrice(high)} />
+        <Stat label="Low" value={fmtPrice(low)} />
+        <Stat
+          label="Range"
+          value={rangePct === null ? "—" : fmtPct(rangePct)}
+        />
+        <Stat
+          label="Window Δ"
+          value={windowChange === null ? "—" : fmtPct(windowChange)}
+        />
+        <Stat label="Avg vol/bar" value={fmtVolume(avgVol)} wide />
+      </dl>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Alerts for this asset
+// ---------------------------------------------------------------------------
+
+interface AlertsPanelState {
+  alerts: PriceAlert[];
+  loading: boolean;
+  error: string | null;
+}
+
+function AlertsForAssetPanel({
+  assetId,
+  symbol,
+  lastCreatedId,
+  onCreate,
+}: {
+  assetId: number;
+  symbol: string;
+  lastCreatedId: number | null;
+  onCreate: () => void;
+}) {
+  const [state, setState] = useState<AlertsPanelState>({
+    alerts: [],
+    loading: true,
+    error: null,
+  });
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let cancelled = false;
+    listAlerts({ assetId, signal: controller.signal })
+      .then((data) => {
+        if (!cancelled) {
+          setState({ alerts: data.alerts, loading: false, error: null });
+        }
+      })
+      .catch((err: unknown) => {
+        if (cancelled || controller.signal.aborted) return;
+        setState({
+          alerts: [],
+          loading: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+    // Refetch whenever a new alert lands on this page — the id is enough to
+    // trigger a fresh pull without having to thread the whole alert object.
+  }, [assetId, lastCreatedId]);
+
+  const armed = state.alerts.filter((a) => a.is_active && !a.triggered_at);
+  const triggered = state.alerts.filter((a) => a.triggered_at !== null);
+
+  return (
+    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+      <div className="flex items-center justify-between">
+        <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+          <Bell className="h-3.5 w-3.5" />
+          Alerts for {symbol}
+        </h3>
+        <button
+          type="button"
+          onClick={onCreate}
+          className="text-[11px] font-medium text-emerald-700 hover:underline dark:text-emerald-300"
+        >
+          + New
+        </button>
+      </div>
+
+      {state.loading ? (
+        <p className="mt-3 text-sm text-zinc-400 dark:text-zinc-500">Loading…</p>
+      ) : state.error ? (
+        <p className="mt-3 text-xs text-rose-600 dark:text-rose-400">
+          {state.error}
+        </p>
+      ) : state.alerts.length === 0 ? (
+        <p className="mt-3 text-sm text-zinc-400 dark:text-zinc-500">
+          No alerts on {symbol} yet.
+        </p>
+      ) : (
+        <>
+          <div className="mt-2 flex gap-3 text-[11px] text-zinc-500 dark:text-zinc-400">
+            <span>
+              <span className="font-mono font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                {armed.length}
+              </span>{" "}
+              armed
+            </span>
+            <span>
+              <span className="font-mono font-semibold tabular-nums text-amber-600 dark:text-amber-400">
+                {triggered.length}
+              </span>{" "}
+              triggered
+            </span>
+          </div>
+          <ul className="mt-2 space-y-1.5">
+            {state.alerts.slice(0, 5).map((a) => (
+              <li
+                key={a.id}
+                className="flex items-center justify-between gap-2 text-xs"
+              >
+                <span
+                  className={
+                    a.triggered_at
+                      ? "text-amber-700 dark:text-amber-400"
+                      : a.is_active
+                        ? "text-zinc-700 dark:text-zinc-300"
+                        : "text-zinc-400 line-through dark:text-zinc-500"
+                  }
+                >
+                  {a.direction === "above" ? "↑" : "↓"}{" "}
+                  <span className="font-mono tabular-nums">
+                    {Number(a.threshold).toLocaleString(undefined, {
+                      maximumFractionDigits: 4,
+                    })}
+                  </span>
+                </span>
+                {a.note && (
+                  <span className="truncate text-[11px] text-zinc-400 dark:text-zinc-500">
+                    {a.note}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+          {state.alerts.length > 5 && (
+            <Link
+              to="/alerts"
+              className="mt-3 inline-block text-[11px] font-medium text-emerald-700 hover:underline dark:text-emerald-300"
+            >
+              See all {state.alerts.length} →
+            </Link>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Latest bar (compact OHLCV)
+// ---------------------------------------------------------------------------
+
+function LatestBarPanel({ last }: { last: PricePoint | undefined }) {
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
       <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
@@ -325,6 +867,10 @@ function Stat({
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// News panel
+// ---------------------------------------------------------------------------
 
 interface NewsPanelState {
   articles: Article[];
