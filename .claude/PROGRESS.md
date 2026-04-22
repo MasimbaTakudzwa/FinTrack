@@ -12,9 +12,9 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-22 — Session 003 (checkpoint 5 — Sprint 3 milestones 3A–3C landed)
-**Active sprint:** Sprint 3 — React UI Dashboard (3D next)
-**Overall status:** 🟢 Sprints 1 & 2 complete; Sprint 3 plumbing + shell + dashboard live
+**Last updated:** 2026-04-22 — Session 003 (checkpoint 6 — Sprint 3 milestones 3A–3E landed)
+**Active sprint:** Sprint 3 — React UI Dashboard (3F next — final)
+**Overall status:** 🟢 Sprints 1 & 2 complete; Sprint 3 5/6 milestones complete — dashboard, asset detail chart, market overview all live
 
 ### What was just completed (Sprint 2 first pass)
 - **PricePoint model + migration**: `sidecar/db/models.py` — `PricePoint` with FK to `assets`, `Numeric(18,6)` for o/h/l/c, `BigInteger` volume, composite index `ix_price_points_asset_ts` on `(asset_id, timestamp)`, unique constraint `uq_price_points_asset_ts` for dedup. Alembic migration `0002_create_price_points.py` — runs cleanly on top of 0001. Asset ↔ PricePoint relationship wired with `cascade="all, delete-orphan"`
@@ -39,19 +39,22 @@
 - **`vacuum_db` weekly job** — low priority, add with Sprint 4 scheduler work
 
 ### What was completed (Sprint 3 so far)
-- **3A — Plumbing (`df1c30e`)**: Tailwind v4.2.4 via `@tailwindcss/vite`; class-based dark variant via `@custom-variant`. Zustand 5 settings store (`useSettings`) with persist middleware (localStorage key `fintrack-settings`) — `theme: "system" | "light" | "dark"` + `resolveTheme()` + `applyTheme()`. Rewrote API client as `apiGet<T>` + `ApiError` with typed endpoints: `getHealth`, `listAssets`, `getPriceSeries`, `listMacroIndicators`, `getMacroSeries`. Decimal fields typed as `string` (Pydantic serialises Decimal to string); timestamps as ISO-8601 UTC.
+- **3A — Plumbing (`df1c30e`)**: Tailwind v4.2.4 via `@tailwindcss/vite`; class-based dark variant via `@custom-variant`. Zustand 5 settings store (`useSettings`) with persist middleware (localStorage key `fintrack-settings`) — `theme: "system" | "light" | "dark"` + `resolveTheme()` + `applyTheme()` + `useResolvedTheme()` hook (useSyncExternalStore-based, reacts to OS prefers-color-scheme changes). Rewrote API client as `apiGet<T>` + `ApiError` with typed endpoints: `getHealth`, `listAssets`, `getPriceSeries`, `listMacroIndicators`, `getMacroSeries`. Decimal fields typed as `string` (Pydantic serialises Decimal to string); timestamps as ISO-8601 UTC.
 - **3B — App shell (`5d570ac`)**: HashRouter with routes `/`, `/assets/:symbol`, `/market`, `/macro`, `/settings` — HashRouter chosen so deep-link refresh works in the Tauri webview without a SPA fallback server. `AppShell` layout = sidebar + sticky header + scrollable main. `Sidebar` with NavLink + lucide icons + active-state styling. `Header` with dynamic page title + `HealthIndicator` (moved from App.tsx, polls `/api/health/` every 2s) + `ThemeToggle` (cycles system→light→dark, reads/writes the settings store). Placeholder pages for Dashboard, Market, Macro, AssetDetail, Settings via shared `PagePlaceholder`. Retired `App.css`; fully on Tailwind. Installed `react-router-dom@7.14.2`, `lucide-react@1.8.0`.
 - **3C — Dashboard (`e3fd661`)**: Parallel fan-out — `listAssets()` then `Promise.all` of `getPriceSeries(symbol, { limit: 60 })`. `AssetCard` shows symbol + name + asset-type pill, last close (tabular-nums), day change % vs previous close with colour-coded arrow, and a 60-bar inline-SVG `Sparkline`. Empty/error states rendered distinctly; Refresh button re-runs the whole pass. Card links to `/assets/:symbol` so 3D slots in without plumbing changes. Bumped tsconfig `target`/`lib` to ES2022 for `Array.prototype.at`.
+- **3D — Asset detail (`1915c35`)**: `AssetDetail` fetches asset (find by symbol in `listAssets({ activeOnly: false })`) and 500 bars in parallel. Unknown-symbol, load-error, empty-bars, and loaded states all rendered. `CandleChart` wraps `lightweight-charts@5.1.0` via `createChart` + `chart.addSeries(CandlestickSeries)` + histogram for volume on an inset price scale. Theme palette switches between light/dark based on `useResolvedTheme()`. `PricePanel` shows OHLC + volume grid. News sidebar is a placeholder pointing at Sprint 4.
+- **3E — Market overview (`da225d6`)**: Top 5 gainers + top 5 losers ranked by day-change %, each row linking to `/assets/:symbol`. "By asset type" breakdown counts stock/etf/crypto/commodity/index. Minimal payload — `getPriceSeries(symbol, { limit: 2 })` for each asset since we only need the last two closes. Sector heatmap deferred (Asset model carries no sector field).
 
 ### What to work on NEXT (in order)
 1. [x] ~~Sprint 2 follow-ups~~ — landed as `afe3170`
-2. **Sprint 3 — React UI Dashboard** (in flight)
+2. **Sprint 3 — React UI Dashboard** (5 of 6 milestones complete)
    - [x] 3A — Plumbing: Tailwind + Zustand + typed API client (`df1c30e`)
    - [x] 3B — App shell: sidebar/header/router/theme toggle (`5d570ac`)
    - [x] 3C — Dashboard watchlist grid (`e3fd661`)
-   - [ ] 3D — Asset detail page: TradingView Lightweight Charts + price panel
-   - [ ] 3E — Market overview (top movers, sector heatmap — minimal)
-   - [ ] 3F — Settings page (data-source toggles, refresh intervals, DB path)
+   - [x] 3D — Asset detail with Lightweight Charts (`1915c35`)
+   - [x] 3E — Market overview (top movers + type counts) (`da225d6`)
+   - [ ] 3F — Settings page: theme selector (client), data-source toggles + refresh intervals + DB path. Note: mutable server settings will require a new `settings` table + `/api/config/` GET/PUT endpoints or `.env` override mechanism — scope decision pending. Read-only display of current env config is the minimum viable path.
+3. [ ] **Live GUI verification** — run `pnpm tauri dev` to confirm shell → sidecar round-trip still works with the new UI. Smoke test Dashboard → AssetCard click → AssetDetail candle chart, refresh, theme toggle, and nav-link active states.
 
 ### Active blockers
 - None
@@ -168,8 +171,8 @@
 - [x] Tailwind + Zustand set up in `shell/src/` (3A — `df1c30e`)
 - [x] App shell: sidebar nav, header, dark mode toggle (respects OS preference) (3B — `5d570ac`)
 - [x] Dashboard page: watchlist grid with sparkline + day change % (3C — `e3fd661`)
-- [ ] Asset detail page: full OHLCV chart (TradingView Lightweight Charts), recent news sidebar (3D)
-- [ ] Market overview: top movers, sector heatmap (3E)
+- [x] Asset detail page: full OHLCV chart (TradingView Lightweight Charts), recent news placeholder (3D — `1915c35`)
+- [x] Market overview: top movers, asset-type counts (sector heatmap deferred — no sector field on Asset) (3E — `da225d6`)
 - [ ] Settings page: data source toggles, refresh intervals, clear cache, DB file path (3F)
 
 ---
