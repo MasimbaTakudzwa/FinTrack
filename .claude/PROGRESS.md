@@ -12,35 +12,49 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-22 — Session 002 (checkpoint 1 — Sprint 1 Milestones 1A–1E landed)
-**Active sprint:** Sprint 1 — Desktop Scaffold
-**Overall status:** 🟢 Scaffold working end-to-end; final kill-test + commit pending, then Sprint 2
+**Last updated:** 2026-04-22 — Session 002 (checkpoint 2 — Sprint 2 backend pipeline first-pass landed)
+**Active sprint:** Sprint 2 — Market Data Pipeline
+**Overall status:** 🟢 Backend ingestion pipeline working end-to-end; UI untouched (Sprint 3); CoinGecko/FRED fetchers deferred
 
-### What was just completed
-- **Milestone 1A — Tauri shell**: `shell/` scaffolded via `pnpm create tauri-app` (React + TS + Vite). Identifier `com.fintrack.app`, display name "FinTrack", 1280×800 window, devtools in dev only, CSP `connect-src` allows `http://127.0.0.1:* http://localhost:*`. `pnpm tauri dev` opens a blank window on Mac
-- **Milestone 1B — Sidecar skeleton**: `sidecar/` with `main.py` (FastAPI + uvicorn reading `FINTRACK_PORT`), `api/health.py` returning `{"status":"ok","version":"0.1.0"}`, `config.py` (pydantic-settings `FINTRACK_` prefix), `requirements.txt` (+ `pydantic-settings`, `platformdirs`), `requirements-dev.txt`. Standalone `python -m sidecar.main` + `curl /api/health/` verified
-- **Milestone 1C — DB + Alembic**: `db/engine.py` with WAL / synchronous=NORMAL / foreign_keys=ON / busy_timeout=5000 pragmas. Dev DB heuristic (repo root detection via `pyproject.toml` + `sidecar/`) falls back to platformdirs. `db/base.py` DeclarativeBase with naming convention. `db/models.py` `Asset` using `StrEnum`. Alembic wired via `db/migrations_runner.py` (programmatic `command.upgrade` with `config.attributes["db_path"]` injection). First migration `0001_create_assets` runs on sidecar startup via lifespan. Unique index `ix_assets_symbol`
-- **Milestone 1D — Tauri ↔ sidecar wiring**: `src-tauri/src/lib.rs` (not `main.rs` — Tauri v2 template splits it) picks a free port via `TcpListener::bind("127.0.0.1:0")`, spawns `.venv/bin/python -m sidecar.main` as child with `FINTRACK_PORT` env, polls `/api/health/` with `ureq` (max 10s) before proceeding, exposes `get_sidecar_port` command, kills child on `RunEvent::Exit` AND on `WindowEvent::CloseRequested` → `app.exit(0)` (needed on macOS where closing the main window otherwise keeps the app alive and orphans the sidecar). `FINTRACK_EXTERNAL_SIDECAR=1` skips spawn and uses port 8765
-- **Milestone 1E — Health-check UI**: `shell/src/api/client.ts` caches base URL via `invoke<number>('get_sidecar_port')`. `App.tsx` polls `getHealth()` every 2s with `AbortController` cleanup, renders green "Sidecar healthy — v0.1.0" badge or red error with retry. Manually verified on Mac: `pnpm tauri dev` → window opens → green badge appears. `./fintrack.db` created at repo root with `assets` table
-- **CORS fix**: webview origin is `http://localhost:1420` in dev (Vite) and `tauri://localhost` in prod — cross-origin to the sidecar. Added `CORSMiddleware` with a fixed 4-origin allowlist (no wildcard). This resolved the initial "Sidecar unreachable" error
-- Verifications: `pytest` 2/2 green, `ruff check .` clean, `mypy --strict sidecar/` clean, `cargo check` clean, `pnpm --prefix shell build` clean
+### What was just completed (Sprint 2 first pass)
+- **PricePoint model + migration**: `sidecar/db/models.py` — `PricePoint` with FK to `assets`, `Numeric(18,6)` for o/h/l/c, `BigInteger` volume, composite index `ix_price_points_asset_ts` on `(asset_id, timestamp)`, unique constraint `uq_price_points_asset_ts` for dedup. Alembic migration `0002_create_price_points.py` — runs cleanly on top of 0001. Asset ↔ PricePoint relationship wired with `cascade="all, delete-orphan"`
+- **Seed script**: `sidecar/db/seed.py` with `DEFAULT_ASSETS` tuple (AAPL, MSFT, GOOGL, NVDA, SPY, QQQ, GLD, BTC-USD, ETH-USD, SOL-USD), idempotent `seed_default_assets()` that checks existing symbols before insert. Called from lifespan when `FINTRACK_ENABLE_SEED=true`
+- **yfinance fetcher**: `sidecar/ingestion/yfinance_fetcher.py` — batched `yf.download(tickers=..., group_by="ticker", auto_adjust=True, threads=True)`, exponential backoff with jitter (up to 4 attempts, base 1s, cap 30s), `PriceBar` dataclass output, NaN/None-safe normalization, UTC-aware timestamps. Handles single-symbol vs multi-symbol DataFrame shapes
+- **Scheduler**: `sidecar/scheduler/__init__.py` — `BackgroundScheduler` + `SQLAlchemyJobStore` pointing at the SQLite DB, `ThreadPoolExecutor(max_workers=4)`, `misfire_grace_time=60`, `coalesce=True`, `max_instances=1`, UTC timezone. `start()`/`shutdown()` idempotent with module-level lock. Gated by `FINTRACK_ENABLE_SCHEDULER` (default true; disabled in tests)
+- **ingest_prices job**: `sidecar/scheduler/jobs.py` — loads active asset symbols, calls `fetch_prices`, maps back to asset_ids, bulk-upserts via `sqlite.insert(...).on_conflict_do_nothing(index_elements=["asset_id","timestamp"])`. Returns new-row count. FetcherError is caught and logged (scheduler retries on next tick)
+- **API endpoints**: `GET /api/assets/?active_only=true` (default), `GET /api/prices/{symbol}/?from=&to=&limit=500` (alpha-case-insensitive, 404 on unknown, ascending time, limit 1–10000). Pydantic response models with `ConfigDict(from_attributes=True)`, Annotated query params to satisfy B008
+- **Lifespan wiring**: migrations → seed (if enabled) → scheduler start (if enabled); shutdown drains scheduler
+- **Live verification**: one-shot `ingest_prices()` against Yahoo → 714 bars pulled for the 10 seed assets, `/api/prices/AAPL/?limit=3` returned 5-minute OHLCV bars as expected. Unique constraint prevents duplicate inserts on re-run
+- Verifications: `pytest` 21/21 green, `ruff check .` clean, `mypy --strict sidecar/` clean on 20 files
+
+### What was deferred from Sprint 2 (next pass)
+- **`ingestion/coingecko_fetcher.py`** — Yahoo already covers crypto via `BTC-USD`/`ETH-USD`/`SOL-USD`, so a dedicated CoinGecko path is a fallback/complement, not critical path
+- **`ingestion/fred_fetcher.py` + `ingest_macro` job** — needs `FRED_API_KEY`; gated until the user provisions one
+- **`ingest_crypto` job** — same reasoning as CoinGecko; current `ingest_prices` already ingests crypto symbols alongside stocks
+- **`vacuum_db` weekly job** — low priority, add with Sprint 4 scheduler work
 
 ### What to work on NEXT (in order)
-1. [ ] **Finish 1E kill-test** — while `pnpm tauri dev` is running, close the window and confirm `pgrep -f sidecar.main` returns nothing (RunEvent::Exit → child.kill() path)
-2. [ ] **Commit Sprint 1** — single atomic commit `feat(sprint-1): desktop scaffold with sidecar health check` covering shell + sidecar + tests + PROGRESS/ARCHITECTURE updates
-3. [ ] **Start Sprint 2 — Market Data Pipeline**: `PricePoint` model + migration, `yfinance_fetcher` with batched `yf.download` + exponential backoff, APScheduler `BackgroundScheduler` + `SQLAlchemyJobStore` + `misfire_grace_time=60`, `ingest_prices` job (5 min), `GET /api/assets/`, `GET /api/prices/{symbol}/`, seed script for the 10 default assets
+1. [ ] **Commit Sprint 2 first pass** — `feat(sprint-2): market data pipeline (yfinance + scheduler + assets/prices API)`
+2. [ ] **Finish Sprint 1 kill-test** — still outstanding; user-hands-only
+3. [ ] **Sprint 2 follow-up** (optional before Sprint 3): CoinGecko fetcher + `ingest_crypto`, FRED fetcher + `ingest_macro`, `vacuum_db` weekly
+4. [ ] **Start Sprint 3 — React UI Dashboard**: Tailwind + Zustand, app shell, watchlist grid, asset detail with TradingView Lightweight Charts
 
 ### Active blockers
 - None
 
-### Session notes
-- **CORS required even on localhost**: Vite dev server origin `http://localhost:1420` ≠ sidecar origin `http://127.0.0.1:<port>` — browser treats them as cross-origin. Keep the allowlist explicit (don't use `*`) so prod `tauri://localhost` and dev `localhost:1420` are both covered
-- **macOS window-close quirk**: on Mac, Tauri keeps the app alive after the last window closes (menu-bar-app behavior). Without a `WindowEvent::CloseRequested` → `app.exit(0)` handler, `RunEvent::Exit` never fires and the python child is orphaned. `pgrep -f sidecar.main` is the go-to verification
-- **Dev DB path heuristic**: when CWD has `pyproject.toml` + `sidecar/`, DB is `./fintrack.db` (gitignored); otherwise `platformdirs.user_data_dir("FinTrack","FinTrack")`. Tests always pass an explicit `db_path` to `upgrade_to_head` for isolation
-- **Tauri v2 template split**: entry is `src-tauri/src/lib.rs` (exports `run()`), not `main.rs` — easy gotcha when following older Tauri docs
-- **StrEnum + ruff UP042**: use `from enum import StrEnum` (Python 3.11+) instead of `class X(str, Enum)`
-- **Alembic `path_separator`**: newer Alembic deprecates `version_path_separator` alone — add `path_separator = os` alongside it to silence the warning
-- **ESLint flat config gotcha**: `eslint-plugin-react-hooks@7` top-level `configs["recommended-latest"]` is still the legacy eslintrc shape. For flat config use `reactHooks.configs.flat["recommended-latest"]`. Also `pnpm --prefix` is an npm-only flag — pnpm uses `-C <dir>` or `--dir <dir>`
+### Session notes (additions from Sprint 2)
+- **yfinance DataFrame shape**: with a single symbol, `yf.download` returns a flat-column DataFrame (`Open, High, Low, Close, Volume`); with multiple symbols and `group_by="ticker"`, columns become a MultiIndex `(symbol, field)`. Fetcher branches on `len(unique) == 1`
+- **SQLite on_conflict_do_nothing**: pass `index_elements=["asset_id","timestamp"]` (column names), not the constraint name. Works with either a unique index or a named unique constraint
+- **`CursorResult.rowcount` typing**: `session.execute(insert_stmt)` returns `Result[Any]` in SQLAlchemy's type stubs; actual returned object is `CursorResult` which exposes `rowcount`. Use `cast(CursorResult[...], session.execute(stmt))` to satisfy mypy
+- **FastAPI B008**: ruff flags `= Query(...)` in defaults. Use `Annotated[T, Query(alias="from")] = None` — also the idiomatic FastAPI 0.110+ style
+- **Test isolation**: conftest sets `FINTRACK_ENABLE_SCHEDULER=false` and `FINTRACK_ENABLE_SEED=false` at module import (before `sidecar.config` is loaded) so `TestClient(app)` lifespan doesn't start a live scheduler or seed real data. `isolated_db` fixture points `FINTRACK_DB_PATH` at a tmp file and resets the global engine/sessionmaker per test
+- **URL-encoded `+` in query strings**: `datetime.isoformat()` emits `+00:00` which `TestClient.get(url, ...)` does NOT auto-encode when you interpolate it into the URL. Use `params={...}` so httpx encodes it, otherwise FastAPI returns 422
+- **SQLite DateTime without tz**: stored values come back as naive datetimes even though we write UTC-aware. Pydantic then serialises without offset. Frontend must treat timestamps as UTC. Acceptable for now; revisit if confusion arises
+- **CORS required even on localhost** (from Sprint 1): Vite `http://localhost:1420` ≠ sidecar `http://127.0.0.1:<port>`. Keep the 4-origin allowlist explicit
+- **macOS window-close quirk** (from Sprint 1): `WindowEvent::CloseRequested` → `app.exit(0)` handler is required so `RunEvent::Exit` fires and the python child is killed
+- **Dev DB path heuristic**: when CWD has `pyproject.toml` + `sidecar/`, DB is `./fintrack.db` (gitignored); otherwise `platformdirs.user_data_dir("FinTrack","FinTrack")`
+- **Tauri v2 template split**: entry is `src-tauri/src/lib.rs`, not `main.rs`
+- **ESLint flat config gotcha**: use `reactHooks.configs.flat["recommended-latest"]`, and `pnpm -C <dir>` (not `--prefix` which is npm-only)
 - Phase 1 dev runs unsigned binaries — code signing deferred to Sprint 5
 - SQLite WAL mode mandatory — scheduler writes concurrently with UI reads
 - Sidecar never binds to 0.0.0.0 — always 127.0.0.1
@@ -105,16 +119,25 @@
 **Scope:** Phase 1
 
 #### Tasks (refine at Sprint 2 start)
-- [ ] `sidecar/db/models.py` — `Asset`, `PricePoint` SQLAlchemy models (composite index on `asset_id, timestamp DESC`)
-- [ ] Alembic migration for `price_points`
-- [ ] `sidecar/ingestion/yfinance_fetcher.py` — batched `yf.download`, exponential backoff
-- [ ] `sidecar/ingestion/coingecko_fetcher.py` — top 10 crypto OHLCV
-- [ ] `sidecar/ingestion/fred_fetcher.py` — macro indicators (requires `FRED_API_KEY`)
-- [ ] `sidecar/scheduler/__init__.py` — APScheduler `BackgroundScheduler` + `SQLAlchemyJobStore`, misfire grace 60s
-- [ ] `sidecar/scheduler/jobs.py` — `ingest_prices` (5 min), `ingest_crypto` (5 min), `ingest_macro` (daily 06:00)
-- [ ] `GET /api/assets/` — list tracked assets
-- [ ] `GET /api/prices/{symbol}/?from=&to=&limit=` — last N price points with date filter
-- [ ] Seed script: 10 default assets (AAPL, MSFT, GOOGL, NVDA, SPY, QQQ, GLD, BTC-USD, ETH-USD, SOL-USD)
+- [x] `sidecar/db/models.py` — `Asset`, `PricePoint` SQLAlchemy models (composite index on `asset_id, timestamp`)
+- [x] Alembic migration for `price_points`
+- [x] `sidecar/ingestion/yfinance_fetcher.py` — batched `yf.download`, exponential backoff
+- [ ] `sidecar/ingestion/coingecko_fetcher.py` — top 10 crypto OHLCV (deferred — Yahoo covers crypto for now)
+- [ ] `sidecar/ingestion/fred_fetcher.py` — macro indicators (deferred — needs `FRED_API_KEY`)
+- [x] `sidecar/scheduler/__init__.py` — APScheduler `BackgroundScheduler` + `SQLAlchemyJobStore`, misfire grace 60s
+- [x] `sidecar/scheduler/jobs.py` — `ingest_prices` (5 min covering stocks/ETFs/crypto via yfinance)
+- [ ] `sidecar/scheduler/jobs.py` — `ingest_crypto` (5 min via CoinGecko — deferred)
+- [ ] `sidecar/scheduler/jobs.py` — `ingest_macro` (daily 06:00 via FRED — deferred)
+- [x] `GET /api/assets/` — list tracked assets
+- [x] `GET /api/prices/{symbol}/?from=&to=&limit=` — last N price points with date filter
+- [x] Seed script: 10 default assets (AAPL, MSFT, GOOGL, NVDA, SPY, QQQ, GLD, BTC-USD, ETH-USD, SOL-USD)
+
+#### Sprint 2 verification checklist
+- [x] `pytest` — 21/21 tests pass (migrations, seed, API assets/prices, yfinance fetcher normalization, ingest_prices job upsert/idempotency)
+- [x] `ruff check .` — 0 errors
+- [x] `mypy --strict sidecar/` — 0 errors on 20 files
+- [x] Live yfinance ingest verified: `ingest_prices()` → 714 bars across 10 seed assets
+- [x] Live API verified: `/api/assets/` returns seeded list, `/api/prices/AAPL/?limit=3` returns 5-min OHLCV bars, `/api/prices/ZZZ/` returns 404
 
 ---
 

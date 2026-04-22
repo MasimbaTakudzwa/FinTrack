@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     db_path: str = ""
     log_level: str = "info"
     fred_api_key: str | None = None
+    enable_scheduler: bool = True
+    enable_seed: bool = True
+    ingest_prices_interval_minutes: int = 5
 
     def resolved_db_path(self) -> str:
         return self.db_path or _default_db_path()

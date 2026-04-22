@@ -8,10 +8,13 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from sidecar import __version__
+from sidecar import __version__, scheduler
+from sidecar.api.assets import router as assets_router
 from sidecar.api.health import router as health_router
+from sidecar.api.prices import router as prices_router
 from sidecar.config import settings
 from sidecar.db.migrations_runner import upgrade_to_head
+from sidecar.db.seed import seed_default_assets
 
 ALLOWED_ORIGINS = [
     "http://localhost:1420",
@@ -28,7 +31,26 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info("Running database migrations...")
     upgrade_to_head()
     logger.info("Database ready at %s", settings.resolved_db_path())
-    yield
+
+    if settings.enable_seed:
+        try:
+            created = seed_default_assets()
+            if created:
+                logger.info("Seeded %d default assets", created)
+        except Exception:
+            logger.exception("Seeding default assets failed (continuing)")
+
+    if settings.enable_scheduler:
+        try:
+            scheduler.start()
+        except Exception:
+            logger.exception("Scheduler startup failed (continuing)")
+
+    try:
+        yield
+    finally:
+        if settings.enable_scheduler:
+            scheduler.shutdown(wait=False)
 
 
 app = FastAPI(title="FinTrack Sidecar", version=__version__, lifespan=lifespan)
@@ -40,6 +62,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(health_router)
+app.include_router(assets_router)
+app.include_router(prices_router)
 
 
 def main() -> None:
