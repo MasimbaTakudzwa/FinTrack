@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getHealth, HealthResponse } from "./api/client";
+import { applyTheme, resolveTheme, useSettings } from "./stores/useSettings";
 import "./App.css";
 
 type HealthState =
@@ -12,6 +13,16 @@ const POLL_INTERVAL_MS = 2000;
 function App() {
   const [state, setState] = useState<HealthState>({ kind: "loading" });
   const [tick, setTick] = useState(0);
+  const themeMode = useSettings((s) => s.theme);
+
+  useEffect(() => {
+    applyTheme(resolveTheme(themeMode));
+    if (themeMode !== "system") return;
+    const mql = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => applyTheme(resolveTheme("system"));
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, [themeMode]);
 
   useEffect(() => {
     const controller = new AbortController();
