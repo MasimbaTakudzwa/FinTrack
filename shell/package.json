@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "tauri": "tauri",
-    "tauri:build:unsigned": "tauri build --config {\"bundle\":{\"createUpdaterArtifacts\":false}}"
+    "tauri:build:unsigned": "tauri build --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
