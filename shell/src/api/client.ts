@@ -193,6 +193,31 @@ export function createAsset(
   );
 }
 
+export interface AssetQuote {
+  symbol: string;
+  exchange: string | null;
+  currency: string | null;
+  /** Last close from our price_points table (not a live quote). */
+  last_price: string | null;
+  /** yfinance fast_info market cap, if exposed for this symbol. */
+  market_cap: number | null;
+  /** 52-week high/low and moving averages from fast_info. */
+  year_high: string | null;
+  year_low: string | null;
+  fifty_day_average: string | null;
+  two_hundred_day_average: string | null;
+}
+
+export function getAssetQuote(
+  symbol: string,
+  signal?: AbortSignal,
+): Promise<AssetQuote> {
+  return apiGet<AssetQuote>(
+    `/api/assets/${encodeURIComponent(symbol)}/quote/`,
+    { signal },
+  );
+}
+
 // ---------- Prices ----------
 
 export interface PricePoint {
@@ -289,6 +314,7 @@ export interface Article {
   source: string;
   published_at: string; // ISO 8601 — treat as UTC
   summary: string | null;
+  image_url: string | null;
   symbols: string[];
 }
 

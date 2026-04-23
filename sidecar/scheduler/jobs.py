@@ -177,6 +177,7 @@ def _upsert_articles(
             "source": item.source,
             "published_at": item.published_at,
             "summary": item.summary,
+            "image_url": item.image_url,
         }
         for item in items
     ]

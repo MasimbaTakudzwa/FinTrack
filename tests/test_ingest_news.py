@@ -19,7 +19,7 @@ def _seed_assets() -> None:
         )
 
 
-def _make_item(symbol: str, idx: int) -> NewsItem:
+def _make_item(symbol: str, idx: int, image_url: str | None = None) -> NewsItem:
     return NewsItem(
         url=f"https://example.com/{symbol}/{idx}",
         headline=f"{symbol} headline {idx}",
@@ -27,7 +27,29 @@ def _make_item(symbol: str, idx: int) -> NewsItem:
         published_at=datetime(2026, 4, 22, 12, idx, tzinfo=UTC),
         summary=f"Summary {idx}",
         symbol=symbol,
+        image_url=image_url,
     )
+
+
+def test_ingest_news_persists_image_url(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_assets()
+    items = [
+        _make_item("AAPL", 0, image_url="https://example.com/pic.jpg"),
+        _make_item("AAPL", 1),  # None
+    ]
+
+    from sidecar.scheduler import jobs
+
+    monkeypatch.setattr(jobs, "fetch_news_for_many", lambda symbols: items)
+
+    jobs.ingest_news()
+
+    with session_scope() as s:
+        rows = {a.url: a for a in s.execute(select(Article)).scalars().all()}
+        assert rows["https://example.com/AAPL/0"].image_url == "https://example.com/pic.jpg"
+        assert rows["https://example.com/AAPL/1"].image_url is None
 
 
 def test_ingest_news_inserts_articles_and_links_them(

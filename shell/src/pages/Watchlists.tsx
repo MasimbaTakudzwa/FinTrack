@@ -25,12 +25,14 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import {
   type Asset,
+  type PriceSeries,
   type WatchlistDetail,
   type WatchlistItem,
   type WatchlistSummary,
   addWatchlistItem,
   createWatchlist,
   deleteWatchlist,
+  getPriceSeries,
   getWatchlist,
   listAssets,
   listWatchlists,
@@ -40,6 +42,20 @@ import {
 } from "../api/client";
 import { AddAssetModal } from "../components/AddAssetModal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { Sparkline } from "../components/Sparkline";
+
+// Shared with AssetCard — kept local to avoid creating a one-off utils module
+// until a third caller shows up.
+function fmtPrice(value: number): string {
+  if (value >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (value >= 1) return value.toFixed(2);
+  return value.toFixed(4);
+}
+
+function fmtPct(pct: number): string {
+  const sign = pct > 0 ? "+" : "";
+  return `${sign}${pct.toFixed(2)}%`;
+}
 
 interface State {
   watchlists: WatchlistSummary[];
@@ -600,6 +616,9 @@ function WatchlistItems({
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
   );
   const [selectedAssetId, setSelectedAssetId] = useState<number | "">("");
+  const [priceSeriesById, setPriceSeriesById] = useState<
+    Record<number, PriceSeries | null>
+  >({});
 
   // If the underlying list changes (e.g. removed an item), reset the add-asset
   // dropdown so a stale id isn't submitted.
@@ -611,6 +630,48 @@ function WatchlistItems({
       setSelectedAssetId("");
     }
   }, [detail]);
+
+  // Fetch price series per item. Key on the SORTED id set so reordering alone
+  // doesn't re-trigger the fetch (the set is unchanged). Add/remove does.
+  const itemSetKey = useMemo(
+    () =>
+      detail.items
+        .map((i) => i.asset_id)
+        .sort((a, b) => a - b)
+        .join(","),
+    [detail.items],
+  );
+
+  useEffect(() => {
+    if (detail.items.length === 0) {
+      return;
+    }
+    const controller = new AbortController();
+    const items = detail.items;
+    Promise.all(
+      items.map(async (item) => {
+        try {
+          const s = await getPriceSeries(item.symbol, {
+            limit: 60,
+            signal: controller.signal,
+          });
+          return [item.asset_id, s] as const;
+        } catch {
+          return [item.asset_id, null] as const;
+        }
+      }),
+    ).then((pairs) => {
+      if (controller.signal.aborted) return;
+      const next: Record<number, PriceSeries | null> = {};
+      for (const [id, s] of pairs) next[id] = s;
+      setPriceSeriesById(next);
+    });
+    return () => controller.abort();
+    // `detail.items` intentionally excluded — reordering changes the array
+    // identity without changing membership, and we don't want to refetch on
+    // drag. `itemSetKey` captures membership.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemSetKey]);
 
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
@@ -707,6 +768,7 @@ function WatchlistItems({
                   <SortableItemRow
                     key={item.asset_id}
                     item={item}
+                    series={priceSeriesById[item.asset_id] ?? null}
                     onRemove={() => onRemoveAsset(item.asset_id)}
                     busy={busy}
                   />
@@ -722,11 +784,12 @@ function WatchlistItems({
 
 interface SortableItemRowProps {
   item: WatchlistItem;
+  series: PriceSeries | null;
   onRemove: () => void;
   busy: boolean;
 }
 
-function SortableItemRow({ item, onRemove, busy }: SortableItemRowProps) {
+function SortableItemRow({ item, series, onRemove, busy }: SortableItemRowProps) {
   const {
     attributes,
     listeners,
@@ -741,6 +804,22 @@ function SortableItemRow({ item, onRemove, busy }: SortableItemRowProps) {
     transition,
     opacity: isDragging ? 0.6 : 1,
   };
+
+  const closes = series?.points.map((p) => Number(p.close)) ?? [];
+  const last = closes.at(-1) ?? null;
+  const prev = closes.length >= 2 ? closes.at(-2) ?? null : null;
+  const changePct =
+    last !== null && prev !== null && prev !== 0
+      ? ((last - prev) / prev) * 100
+      : null;
+  const toneCls =
+    changePct === null
+      ? "text-zinc-500 dark:text-zinc-400"
+      : changePct > 0
+        ? "text-emerald-600 dark:text-emerald-400"
+        : changePct < 0
+          ? "text-rose-600 dark:text-rose-400"
+          : "text-zinc-500 dark:text-zinc-400";
 
   return (
     <li
@@ -757,21 +836,48 @@ function SortableItemRow({ item, onRemove, busy }: SortableItemRowProps) {
       >
         <GripVertical className="h-4 w-4" />
       </button>
-      <span className="w-12 text-sm font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+      <span className="w-14 text-sm font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
         {item.symbol}
       </span>
-      <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+      <span className="hidden rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500 sm:inline dark:bg-zinc-800 dark:text-zinc-400">
         {item.asset_type}
       </span>
       <span className="min-w-0 flex-1 truncate text-xs text-zinc-500 dark:text-zinc-400">
         {item.name}
       </span>
+
+      {/* Price + Δ% */}
+      <div className="hidden w-[86px] shrink-0 text-right md:block">
+        {last === null ? (
+          <div className="text-[10px] text-zinc-400 dark:text-zinc-500">—</div>
+        ) : (
+          <>
+            <div className="text-sm font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+              {fmtPrice(last)}
+            </div>
+            <div className={`text-[10px] tabular-nums ${toneCls}`}>
+              {changePct === null ? "—" : fmtPct(changePct)}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Sparkline — shown whenever we have data, hidden on narrow widths. */}
+      <div className="hidden shrink-0 sm:block">
+        <Sparkline
+          values={closes}
+          width={80}
+          height={26}
+          referenceValue={prev}
+        />
+      </div>
+
       <button
         type="button"
         onClick={onRemove}
         disabled={busy}
         aria-label={`Remove ${item.symbol}`}
-        className="rounded p-1 text-zinc-400 opacity-0 hover:bg-rose-100 hover:text-rose-600 group-hover:opacity-100 disabled:opacity-30 dark:text-zinc-500 dark:hover:bg-rose-950 dark:hover:text-rose-400"
+        className="shrink-0 rounded p-1 text-zinc-400 opacity-0 hover:bg-rose-100 hover:text-rose-600 group-hover:opacity-100 disabled:opacity-30 dark:text-zinc-500 dark:hover:bg-rose-950 dark:hover:text-rose-400"
       >
         <Trash2 className="h-3.5 w-3.5" />
       </button>

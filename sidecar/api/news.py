@@ -22,6 +22,7 @@ class ArticleOut(BaseModel):
     source: str
     published_at: datetime
     summary: str | None
+    image_url: str | None
     symbols: list[str]
 
 
@@ -81,6 +82,7 @@ def list_news(
                 source=a.source,
                 published_at=a.published_at,
                 summary=a.summary,
+                image_url=a.image_url,
                 symbols=sorted(symbols_by_article.get(a.id, [])),
             )
             for a in articles

@@ -78,6 +78,27 @@ def test_list_news_hydrates_symbols(isolated_db: Path) -> None:
         assert by_url["https://example.com/shared"]["symbols"] == ["AAPL", "MSFT"]
 
 
+def test_list_news_exposes_image_url_field(isolated_db: Path) -> None:
+    """Every article in the response must carry an ``image_url`` key
+    (nullable). The seed fixture sets it on exactly one article."""
+    _seed()
+    with session_scope() as s:
+        target = s.execute(
+            select(Article).where(Article.url == "https://example.com/a1")
+        ).scalar_one()
+        target.image_url = "https://example.com/a1.jpg"
+
+    with TestClient(app) as client:
+        resp = client.get("/api/news/")
+        data = resp.json()
+        by_url = {a["url"]: a for a in data["articles"]}
+        assert all("image_url" in a for a in data["articles"])
+        assert by_url["https://example.com/a1"]["image_url"] == (
+            "https://example.com/a1.jpg"
+        )
+        assert by_url["https://example.com/a2"]["image_url"] is None
+
+
 def test_list_news_filter_by_symbol(isolated_db: Path) -> None:
     _seed()
     with TestClient(app) as client:

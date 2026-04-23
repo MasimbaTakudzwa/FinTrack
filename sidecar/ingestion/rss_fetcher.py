@@ -39,6 +39,7 @@ class NewsItem:
     published_at: datetime
     summary: str | None
     symbol: str
+    image_url: str | None = None
 
 
 class RSSFetcherError(RuntimeError):
@@ -74,6 +75,35 @@ def _parse_published(entry: Any) -> datetime | None:
     return None
 
 
+def _extract_image_url(entry: Any) -> str | None:
+    """Pull a thumbnail URL out of a feedparser entry if one is present.
+
+    Yahoo Finance RSS uses both ``<media:thumbnail>`` and ``<media:content>``
+    (Media RSS) on many entries. feedparser normalises those into the
+    ``media_thumbnail`` / ``media_content`` attributes — each a list of dicts
+    with a ``url`` key. We prefer ``media_thumbnail`` (it's the explicit
+    preview image when set) and fall back to ``media_content``. Anything other
+    than an ``http(s)://`` URL is discarded — a few feeds carry odd tracking
+    pixels or data: URIs we don't want to render.
+    """
+    for attr in ("media_thumbnail", "media_content"):
+        media = getattr(entry, attr, None) or (
+            entry.get(attr) if hasattr(entry, "get") else None
+        )
+        if not isinstance(media, list) or not media:
+            continue
+        for item in media:
+            if not isinstance(item, dict):
+                continue
+            url_val = item.get("url")
+            if not isinstance(url_val, str):
+                continue
+            url_val = url_val.strip()
+            if url_val.startswith(("http://", "https://")):
+                return url_val[:1024]
+    return None
+
+
 def _entry_to_item(entry: Any, symbol: str) -> NewsItem | None:
     url = (getattr(entry, "link", None) or "").strip()
     headline = (getattr(entry, "title", None) or "").strip()
@@ -93,6 +123,8 @@ def _entry_to_item(entry: Any, symbol: str) -> NewsItem | None:
     else:
         source = "Yahoo Finance"
 
+    image_url = _extract_image_url(entry)
+
     return NewsItem(
         url=url,
         headline=headline[:512],
@@ -100,6 +132,7 @@ def _entry_to_item(entry: Any, symbol: str) -> NewsItem | None:
         published_at=published_at,
         summary=summary,
         symbol=symbol,
+        image_url=image_url,
     )
 
 

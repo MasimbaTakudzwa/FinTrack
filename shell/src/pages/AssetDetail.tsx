@@ -14,9 +14,11 @@ import {
 import {
   type Article,
   type Asset,
+  type AssetQuote,
   type PriceAlert,
   type PricePoint,
   type PriceSeries,
+  getAssetQuote,
   getPriceSeries,
   listAlerts,
   listAssets,
@@ -428,6 +430,12 @@ function AssetBody({
         </aside>
       </div>
 
+      <MetadataStrip
+        key={asset.symbol}
+        symbol={asset.symbol}
+        fallbackLast={lastClose}
+      />
+
       <PerformancePanel allPoints={series.points} />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -614,6 +622,125 @@ function PerfCell({ label, pct }: { label: string; pct: number | null }) {
       >
         {pct === null ? "—" : fmtPct(pct)}
       </dd>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Metadata strip — exchange, currency, 52w hi/lo, moving averages, market cap
+//
+// Pulled from /api/assets/{symbol}/quote/ which is backed by yfinance
+// fast_info (cached 60 s server-side). Kept deliberately terse — one pill row
+// under the chart; hidden silently on error because this data is secondary
+// to what the chart already shows.
+// ---------------------------------------------------------------------------
+
+function fmtMarketCap(n: number): string {
+  if (n >= 1_000_000_000_000) return `${(n / 1_000_000_000_000).toFixed(2)}T`;
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  return n.toLocaleString();
+}
+
+interface MetaCell {
+  label: string;
+  value: string;
+  toneCls?: string;
+}
+
+function MetadataStrip({
+  symbol,
+  fallbackLast,
+}: {
+  symbol: string;
+  /** Fallback close from the chart when quote.last_price is unavailable. */
+  fallbackLast: number | null;
+}) {
+  const [quote, setQuote] = useState<AssetQuote | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getAssetQuote(symbol, controller.signal)
+      .then((q) => {
+        if (controller.signal.aborted) return;
+        setQuote(q);
+        setErr(null);
+      })
+      .catch((e) => {
+        if (controller.signal.aborted) return;
+        setErr(e instanceof Error ? e.message : String(e));
+      });
+    return () => controller.abort();
+  }, [symbol]);
+
+  if (err) {
+    // Metadata is secondary; silently omit the strip if the endpoint fails
+    // (most common cause: network hiccup or yfinance rate-limit burst).
+    return null;
+  }
+  if (!quote) {
+    return (
+      <div className="rounded-lg border border-dashed border-zinc-200 bg-white px-4 py-2.5 text-center text-[11px] text-zinc-400 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-500">
+        Loading metadata…
+      </div>
+    );
+  }
+
+  const yearHigh = quote.year_high !== null ? Number(quote.year_high) : null;
+  const yearLow = quote.year_low !== null ? Number(quote.year_low) : null;
+  const fifty = quote.fifty_day_average !== null ? Number(quote.fifty_day_average) : null;
+  const twoHundred =
+    quote.two_hundred_day_average !== null ? Number(quote.two_hundred_day_average) : null;
+  const lastForPct =
+    quote.last_price !== null ? Number(quote.last_price) : fallbackLast;
+  const pctFromHigh =
+    lastForPct !== null && yearHigh !== null && yearHigh > 0
+      ? ((lastForPct - yearHigh) / yearHigh) * 100
+      : null;
+
+  const cells: MetaCell[] = [];
+  if (quote.exchange) cells.push({ label: "Exchange", value: quote.exchange });
+  if (quote.currency) cells.push({ label: "Currency", value: quote.currency });
+  if (quote.market_cap !== null) {
+    cells.push({ label: "Market cap", value: fmtMarketCap(quote.market_cap) });
+  }
+  if (yearHigh !== null) cells.push({ label: "52w High", value: fmtPrice(yearHigh) });
+  if (yearLow !== null) cells.push({ label: "52w Low", value: fmtPrice(yearLow) });
+  if (fifty !== null) cells.push({ label: "50d MA", value: fmtPrice(fifty) });
+  if (twoHundred !== null) cells.push({ label: "200d MA", value: fmtPrice(twoHundred) });
+  if (pctFromHigh !== null) {
+    cells.push({
+      label: "From 52w high",
+      value: fmtPct(pctFromHigh),
+      toneCls:
+        pctFromHigh >= 0
+          ? "text-emerald-600 dark:text-emerald-400"
+          : "text-rose-600 dark:text-rose-400",
+    });
+  }
+
+  if (cells.length === 0) {
+    // Every field came back null — no useful strip to render.
+    return null;
+  }
+
+  return (
+    <div className="flex flex-wrap gap-x-6 gap-y-3 rounded-lg border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950">
+      {cells.map((c) => (
+        <div key={c.label} className="min-w-0">
+          <div className="text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+            {c.label}
+          </div>
+          <div
+            className={`mt-0.5 text-sm font-semibold tabular-nums ${
+              c.toneCls ?? "text-zinc-900 dark:text-zinc-100"
+            }`}
+          >
+            {c.value}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
