@@ -7,9 +7,16 @@ yfinance resolution without persisting, and ``POST /api/assets/`` actually
 persists + kicks off a one-shot ingest so the dashboard shows bars
 immediately. See :mod:`sidecar.services.assets` for the resolution logic.
 
+``POST /api/assets/`` is idempotent: posting a symbol that's already
+tracked returns the existing row (with ``newly_added=false`` and
+``bars_ingested=0``) instead of 409-ing. That lets the "Track new…"
+button on a non-default watchlist succeed even when the asset is already
+in another watchlist — the backend will just link it to the requested
+``watchlist_id`` without re-fetching price history.
+
 Error mapping:
-- 404 — symbol could not be resolved against yfinance
-- 409 — symbol already tracked
+- 404 — symbol could not be resolved against yfinance (only when the
+  symbol is genuinely new; already-tracked symbols skip yfinance entirely)
 - 400 — validation error (empty symbol, too long, etc.)
 """
 
@@ -25,7 +32,6 @@ from sqlalchemy import select
 from sidecar.db.engine import session_scope
 from sidecar.db.models import Asset, AssetType
 from sidecar.services.assets import (
-    AssetAlreadyExistsError,
     AssetServiceError,
     SymbolNotFoundError,
     add_asset,
@@ -34,6 +40,7 @@ from sidecar.services.assets import (
 from sidecar.services.watchlists import (
     ItemAlreadyExistsError,
     WatchlistError,
+    WatchlistNotFoundError,
     add_item,
     get_default_watchlist,
 )
@@ -74,12 +81,22 @@ class LookupOut(BaseModel):
 class CreateAssetIn(BaseModel):
     symbol: str = Field(min_length=1, max_length=32)
     add_to_default_watchlist: bool = True
+    # Optional: also link the asset to this specific watchlist. The "Track
+    # new…" button on a non-default watchlist sends this so an already-tracked
+    # asset can be linked to the current list without surfacing a 409. Must
+    # reference an existing watchlist — a bogus id silently no-ops (logged).
+    watchlist_id: int | None = Field(default=None, gt=0)
 
 
 class CreateAssetOut(BaseModel):
     asset: AssetOut
     bars_ingested: int
     added_to_watchlist: bool
+    # True iff the asset was freshly resolved+persisted by this call. False
+    # means it already existed in the assets table and we skipped the
+    # yfinance round-trip entirely. Lets the UI tell "just added AAPL" from
+    # "linked an existing AAPL to this list".
+    newly_added: bool
 
 
 # ---------------------------------------------------------------------------
@@ -123,36 +140,65 @@ def lookup_asset_route(body: LookupIn) -> LookupOut:
 def create_asset_route(body: CreateAssetIn) -> CreateAssetOut:
     """Resolve a yfinance symbol, persist it, and kick off a one-shot ingest.
 
-    Optionally also adds the new asset to the default watchlist so it
-    immediately surfaces on the Dashboard. Failure to add to the watchlist
-    (no default exists, or a race condition) is non-fatal: the asset is
-    still persisted and ingested.
+    Idempotent on the (symbol) side: posting an already-tracked symbol
+    returns the existing row with ``newly_added=false`` and
+    ``bars_ingested=0`` — it does NOT 409. This matters for the "Track
+    new…" button on a non-default watchlist, where the user's intent
+    is "put this on MY list" regardless of whether it's already tracked
+    elsewhere.
+
+    Watchlist linking is additive: we link to the default watchlist if
+    ``add_to_default_watchlist`` is true AND link to ``watchlist_id`` if
+    provided. Either linking path is non-fatal — failure logs and sets
+    ``added_to_watchlist=false``, but the asset itself is still persisted
+    (or left in place, for the already-tracked case).
     """
     try:
         result = add_asset(body.symbol)
     except SymbolNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except AssetAlreadyExistsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except AssetServiceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     added_to_watchlist = False
+
+    def _try_link(watchlist_id: int, *, context: str) -> bool:
+        try:
+            add_item(watchlist_id, result.asset_id)
+            return True
+        except ItemAlreadyExistsError:
+            # Already on that watchlist — end-state matches intent.
+            return True
+        except WatchlistNotFoundError as exc:
+            logger.info(
+                "add_asset(%s): %s-watchlist link skipped (not found): %s",
+                result.symbol,
+                context,
+                exc,
+            )
+            return False
+        except WatchlistError as exc:
+            logger.info(
+                "add_asset(%s): %s-watchlist link skipped: %s",
+                result.symbol,
+                context,
+                exc,
+            )
+            return False
+
     if body.add_to_default_watchlist:
         try:
             default = get_default_watchlist()
-            if default is not None:
-                add_item(default.id, result.asset_id)
-                added_to_watchlist = True
-        except ItemAlreadyExistsError:
-            # Race — someone else added it between our create + now. Count it.
-            added_to_watchlist = True
         except WatchlistError as exc:
-            logger.info(
-                "add_asset(%s): default-watchlist add skipped: %s",
-                result.symbol,
-                exc,
-            )
+            logger.info("add_asset(%s): default lookup failed: %s", result.symbol, exc)
+            default = None
+        if default is not None and _try_link(default.id, context="default"):
+            added_to_watchlist = True
+
+    if body.watchlist_id is not None and _try_link(
+        body.watchlist_id, context="explicit"
+    ):
+        added_to_watchlist = True
 
     # Re-read the row so we return the hydrated AssetOut shape (created_at etc).
     with session_scope() as s:
@@ -165,4 +211,5 @@ def create_asset_route(body: CreateAssetIn) -> CreateAssetOut:
         asset=asset_out,
         bars_ingested=result.bars_ingested,
         added_to_watchlist=added_to_watchlist,
+        newly_added=result.newly_added,
     )

@@ -35,7 +35,14 @@ class SymbolNotFoundError(AssetServiceError):
 
 
 class AssetAlreadyExistsError(AssetServiceError):
-    """Symbol is already in the ``assets`` table."""
+    """Symbol is already in the ``assets`` table.
+
+    Preserved for backwards compatibility — :func:`add_asset` no longer
+    raises this because the "add" operation is idempotent: calling it with
+    a symbol that's already tracked returns the existing row with
+    ``newly_added=False``. Callers that want to enforce "must be new"
+    semantics should check ``AddAssetResult.newly_added`` instead.
+    """
 
 
 @dataclass(frozen=True)
@@ -56,6 +63,11 @@ class AddAssetResult:
     name: str
     asset_type: AssetType
     bars_ingested: int
+    # True iff this call freshly resolved+persisted the asset. False means
+    # the symbol was already in the ``assets`` table, we returned its
+    # existing row as-is, and did NOT run a 60-day re-ingest. Callers
+    # that want "create or fail" semantics can branch on this.
+    newly_added: bool
 
 
 # yfinance returns its own vocabulary for ``quoteType`` (also surfaced on
@@ -166,20 +178,62 @@ def resolve_symbol(raw: str) -> ResolvedSymbol:
 def add_asset(raw: str) -> AddAssetResult:
     """Resolve, persist, and immediately ingest bars for a new asset.
 
+    Idempotent: if the symbol is already in the ``assets`` table, we
+    short-circuit with the existing row (``newly_added=False``,
+    ``bars_ingested=0``) — no yfinance lookup, no re-ingest. This is the
+    semantic the "Track new…" button on a watchlist expects: the user
+    wants the asset on this list, but if we already have it everywhere
+    else, there's no reason to re-fetch its price history.
+
+    Callers that want strict "create or fail" behaviour can branch on
+    ``result.newly_added``.
+
     Raises:
-        SymbolNotFoundError: if yfinance can't resolve the symbol.
-        AssetAlreadyExistsError: if the symbol is already tracked.
+        SymbolNotFoundError: if yfinance can't resolve a *new* symbol.
         AssetServiceError: for validation failures (empty/too-long symbol).
     """
-    resolved = resolve_symbol(raw)
+    # Normalise first so the fast-path lookup (below) uses the same key
+    # the slow-path Asset row would.
+    normalised = raw.strip().upper()
+    if not normalised:
+        raise AssetServiceError("symbol must not be empty")
+    if len(normalised) > _MAX_SYMBOL_LEN:
+        raise AssetServiceError(
+            f"symbol too long (max {_MAX_SYMBOL_LEN} chars)"
+        )
+
+    # Fast path: already tracked → no yfinance call at all.
+    with session_scope() as session:
+        existing = session.execute(
+            select(Asset).where(func.upper(Asset.symbol) == normalised)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return AddAssetResult(
+                asset_id=existing.id,
+                symbol=existing.symbol,
+                name=existing.name,
+                asset_type=existing.asset_type,
+                bars_ingested=0,
+                newly_added=False,
+            )
+
+    # Slow path: fresh add — resolve, persist, ingest.
+    resolved = resolve_symbol(normalised)
 
     with session_scope() as session:
+        # Re-check inside the session to close the race where two
+        # concurrent add-asset calls both passed the fast-path check.
         existing = session.execute(
             select(Asset).where(func.upper(Asset.symbol) == resolved.symbol)
         ).scalar_one_or_none()
         if existing is not None:
-            raise AssetAlreadyExistsError(
-                f"Symbol {resolved.symbol} is already tracked"
+            return AddAssetResult(
+                asset_id=existing.id,
+                symbol=existing.symbol,
+                name=existing.name,
+                asset_type=existing.asset_type,
+                bars_ingested=0,
+                newly_added=False,
             )
         asset = Asset(
             symbol=resolved.symbol,
@@ -215,4 +269,5 @@ def add_asset(raw: str) -> AddAssetResult:
         name=resolved.name,
         asset_type=resolved.asset_type,
         bars_ingested=bars_ingested,
+        newly_added=True,
     )
