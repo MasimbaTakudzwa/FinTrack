@@ -335,6 +335,19 @@ on a clean machine.
 - You're using a standard-validation cert rather than EV. EV certs get
   instant reputation. Azure Trusted Signing counts as EV.
 
+**User reports "FinTrack is damaged and can't be opened, you should move it to the bin" on macOS**
+- Apple Silicon Gatekeeper bite on an adhoc-signed (unsigned) build that carries
+  the `com.apple.quarantine` attribute set by the browser at download time. The
+  app is fine — Gatekeeper just refuses to run unsigned quarantined binaries.
+- User fix: `xattr -cr /Applications/FinTrack.app`, then open normally.
+- Permanent fix: ship signed + notarized builds. The `APPLE_CERTIFICATE` +
+  notarization secrets are already wired in `release.yml`; populate them and
+  the next release will launch clean on first download. $99/yr.
+- Why the README's older "right-click → Open" advice doesn't work here: that
+  workaround clears the *"unidentified developer"* dialog (Intel Macs / older
+  macOS). Apple Silicon + recent macOS shows *"damaged"* for the same underlying
+  condition and Finder doesn't surface an "Open Anyway" button for it.
+
 ---
 
 ## Related files
