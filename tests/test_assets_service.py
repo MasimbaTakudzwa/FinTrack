@@ -388,65 +388,50 @@ def test_add_asset_propagates_resolve_errors(
 # ---------------------------------------------------------------------------
 
 
-class _FakeResponse:
-    """Bare-minimum ``requests.Response`` stand-in."""
-
-    def __init__(
-        self,
-        *,
-        status_code: int = 200,
-        json_payload: Any | None = None,
-        raise_on_json: bool = False,
-    ) -> None:
-        self.status_code = status_code
-        self._json_payload = json_payload
-        self._raise_on_json = raise_on_json
-
-    def json(self) -> Any:
-        if self._raise_on_json:
-            raise ValueError("not JSON")
-        return self._json_payload
-
-
 def _patch_search(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    response: _FakeResponse | None = None,
+    quotes: list[Any] | None = None,
     exc: BaseException | None = None,
-    calls: list[dict[str, Any]] | None = None,
+    calls: list[tuple[str, int]] | None = None,
 ) -> None:
-    """Replace ``requests.get`` used by :func:`search_symbols`."""
+    """Replace :func:`_fetch_search_quotes` used by :func:`search_symbols`.
 
-    def _get(url: str, **kwargs: Any) -> _FakeResponse:
+    Tests pass the raw list of quote dicts (the shape yfinance's
+    ``Search.quotes`` returns); the service-level parsing + cache live
+    downstream. ``exc`` makes the patched fetcher raise instead. ``calls``
+    lets a test assert on how many times — and with what args — the
+    fetcher was invoked.
+    """
+
+    def _fetch(query: str, limit: int) -> list[Any]:
         if calls is not None:
-            calls.append({"url": url, **kwargs})
+            calls.append((query, limit))
         if exc is not None:
             raise exc
-        assert response is not None
-        return response
+        assert quotes is not None
+        return quotes
 
-    monkeypatch.setattr(assets_service.requests, "get", _get)
+    monkeypatch.setattr(assets_service, "_fetch_search_quotes", _fetch)
 
 
 def test_search_symbols_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = {
-        "quotes": [
-            {
-                "symbol": "AAPL",
-                "shortname": "Apple Inc.",
-                "longname": "Apple Inc.",
-                "quoteType": "EQUITY",
-                "exchDisp": "NASDAQ",
-            },
-            {
-                "symbol": "APLE",
-                "shortname": "Apple Hospitality REIT",
-                "quoteType": "EQUITY",
-                "exchDisp": "NYSE",
-            },
-        ]
-    }
-    _patch_search(monkeypatch, response=_FakeResponse(json_payload=payload))
+    quotes = [
+        {
+            "symbol": "AAPL",
+            "shortname": "Apple Inc.",
+            "longname": "Apple Inc.",
+            "quoteType": "EQUITY",
+            "exchDisp": "NASDAQ",
+        },
+        {
+            "symbol": "APLE",
+            "shortname": "Apple Hospitality REIT",
+            "quoteType": "EQUITY",
+            "exchDisp": "NYSE",
+        },
+    ]
+    _patch_search(monkeypatch, quotes=quotes)
 
     hits = assets_service.search_symbols("apple")
     assert len(hits) == 2
@@ -460,15 +445,13 @@ def test_search_symbols_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_search_symbols_maps_quote_types(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = {
-        "quotes": [
-            {"symbol": "BTC-USD", "shortname": "Bitcoin", "quoteType": "CRYPTOCURRENCY"},
-            {"symbol": "SPY", "shortname": "SPDR S&P 500", "quoteType": "ETF"},
-            {"symbol": "^GSPC", "shortname": "S&P 500", "quoteType": "INDEX"},
-            {"symbol": "CL=F", "shortname": "Crude Oil", "quoteType": "FUTURE"},
-        ]
-    }
-    _patch_search(monkeypatch, response=_FakeResponse(json_payload=payload))
+    quotes = [
+        {"symbol": "BTC-USD", "shortname": "Bitcoin", "quoteType": "CRYPTOCURRENCY"},
+        {"symbol": "SPY", "shortname": "SPDR S&P 500", "quoteType": "ETF"},
+        {"symbol": "^GSPC", "shortname": "S&P 500", "quoteType": "INDEX"},
+        {"symbol": "CL=F", "shortname": "Crude Oil", "quoteType": "FUTURE"},
+    ]
+    _patch_search(monkeypatch, quotes=quotes)
 
     hits = assets_service.search_symbols("a")
     by_sym = {h.symbol: h.asset_type for h in hits}
@@ -482,13 +465,11 @@ def test_search_symbols_maps_quote_types(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_search_symbols_dedupes_on_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
     """Yahoo sometimes returns the same symbol across multiple exchanges."""
-    payload = {
-        "quotes": [
-            {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY", "exchDisp": "NASDAQ"},
-            {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY", "exchDisp": "NEO"},
-        ]
-    }
-    _patch_search(monkeypatch, response=_FakeResponse(json_payload=payload))
+    quotes = [
+        {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY", "exchDisp": "NASDAQ"},
+        {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY", "exchDisp": "NEO"},
+    ]
+    _patch_search(monkeypatch, quotes=quotes)
 
     hits = assets_service.search_symbols("apple")
     assert len(hits) == 1
@@ -498,29 +479,25 @@ def test_search_symbols_dedupes_on_symbol(monkeypatch: pytest.MonkeyPatch) -> No
 def test_search_symbols_skips_malformed_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    payload = {
-        "quotes": [
-            {"quoteType": "EQUITY"},  # missing symbol
-            {"symbol": "AAPL"},  # missing quoteType
-            {"symbol": 42, "quoteType": "EQUITY"},  # non-string symbol
-            "not a dict",
-            {"symbol": "TSLA", "shortname": "Tesla", "quoteType": "EQUITY"},
-        ]
-    }
-    _patch_search(monkeypatch, response=_FakeResponse(json_payload=payload))
+    quotes: list[Any] = [
+        {"quoteType": "EQUITY"},  # missing symbol
+        {"symbol": "AAPL"},  # missing quoteType
+        {"symbol": 42, "quoteType": "EQUITY"},  # non-string symbol
+        "not a dict",
+        {"symbol": "TSLA", "shortname": "Tesla", "quoteType": "EQUITY"},
+    ]
+    _patch_search(monkeypatch, quotes=quotes)
 
     hits = assets_service.search_symbols("test")
     assert [h.symbol for h in hits] == ["TSLA"]
 
 
 def test_search_symbols_respects_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = {
-        "quotes": [
-            {"symbol": f"SYM{i}", "shortname": f"Thing {i}", "quoteType": "EQUITY"}
-            for i in range(15)
-        ]
-    }
-    _patch_search(monkeypatch, response=_FakeResponse(json_payload=payload))
+    quotes = [
+        {"symbol": f"SYM{i}", "shortname": f"Thing {i}", "quoteType": "EQUITY"}
+        for i in range(15)
+    ]
+    _patch_search(monkeypatch, quotes=quotes)
 
     hits = assets_service.search_symbols("s", limit=5)
     assert len(hits) == 5
@@ -530,22 +507,15 @@ def test_search_symbols_respects_limit(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_search_symbols_empty_payload_returns_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_search(monkeypatch, response=_FakeResponse(json_payload={"quotes": []}))
-    assert assets_service.search_symbols("xyzzy") == []
-
-
-def test_search_symbols_missing_quotes_key_returns_empty(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_search(monkeypatch, response=_FakeResponse(json_payload={"news": []}))
+    _patch_search(monkeypatch, quotes=[])
     assert assets_service.search_symbols("xyzzy") == []
 
 
 def test_search_symbols_rejects_empty_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Stub requests so a leaked network call would be loud.
-    _patch_search(monkeypatch, response=_FakeResponse(json_payload={"quotes": []}))
+    # Stub the fetcher so a leaked network call would be loud.
+    _patch_search(monkeypatch, quotes=[])
     with pytest.raises(AssetServiceError):
         assets_service.search_symbols("")
     with pytest.raises(AssetServiceError):
@@ -555,7 +525,7 @@ def test_search_symbols_rejects_empty_query(
 def test_search_symbols_rejects_too_long_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_search(monkeypatch, response=_FakeResponse(json_payload={"quotes": []}))
+    _patch_search(monkeypatch, quotes=[])
     with pytest.raises(AssetServiceError):
         assets_service.search_symbols("a" * 100)
 
@@ -563,63 +533,78 @@ def test_search_symbols_rejects_too_long_query(
 def test_search_symbols_rejects_bad_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_search(monkeypatch, response=_FakeResponse(json_payload={"quotes": []}))
+    _patch_search(monkeypatch, quotes=[])
     with pytest.raises(AssetServiceError):
         assets_service.search_symbols("aapl", limit=0)
     with pytest.raises(AssetServiceError):
         assets_service.search_symbols("aapl", limit=1000)
 
 
-def test_search_symbols_http_error_raises(
+def test_search_symbols_fetch_error_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from sidecar.services.assets import SymbolSearchError
-
-    _patch_search(monkeypatch, response=_FakeResponse(status_code=503))
-    with pytest.raises(SymbolSearchError):
-        assets_service.search_symbols("aapl")
-
-
-def test_search_symbols_network_error_raises(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import requests as real_requests
-
-    from sidecar.services.assets import SymbolSearchError
-
-    _patch_search(monkeypatch, exc=real_requests.ConnectionError("DNS down"))
-    with pytest.raises(SymbolSearchError):
-        assets_service.search_symbols("aapl")
-
-
-def test_search_symbols_bad_json_raises(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    """A fetcher failure must propagate as SymbolSearchError so the API
+    layer maps it cleanly to HTTP 502."""
     from sidecar.services.assets import SymbolSearchError
 
     _patch_search(
-        monkeypatch,
-        response=_FakeResponse(json_payload=None, raise_on_json=True),
+        monkeypatch, exc=SymbolSearchError("upstream unreachable: boom")
     )
     with pytest.raises(SymbolSearchError):
         assets_service.search_symbols("aapl")
 
 
-def test_search_symbols_forwards_query_params(
+def test_search_symbols_forwards_query_and_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[dict[str, Any]] = []
-    _patch_search(
-        monkeypatch,
-        response=_FakeResponse(json_payload={"quotes": []}),
-        calls=calls,
-    )
+    """The fetcher must receive the cleaned query + the requested limit."""
+    calls: list[tuple[str, int]] = []
+    _patch_search(monkeypatch, quotes=[], calls=calls)
     assets_service.search_symbols("BTC-USD", limit=7)
-    assert len(calls) == 1
-    params = calls[0]["params"]
-    assert params["q"] == "BTC-USD"
-    assert params["quotesCount"] == 7
-    assert params["newsCount"] == 0
+    assert calls == [("BTC-USD", 7)]
+
+
+# ---------------------------------------------------------------------------
+# _fetch_search_quotes — yfinance.Search adapter
+# ---------------------------------------------------------------------------
+#
+# The yfinance-based fetcher is isolated from the parsing + cache layers so
+# the happy-path search_symbols tests above don't depend on yfinance's
+# internal shape. These two tests exercise the adapter directly to keep
+# the error-mapping + empty-response contract honest.
+
+
+def test_fetch_search_quotes_wraps_yfinance_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``yf.Search`` can raise anything from ``requests.HTTPError`` to
+    ``JSONDecodeError`` — the adapter must collapse all of them to
+    :class:`SymbolSearchError` so the API layer returns HTTP 502."""
+    from sidecar.services.assets import SymbolSearchError
+
+    def _boom(query: str, **kwargs: Any) -> Any:
+        raise RuntimeError("yahoo is down")
+
+    monkeypatch.setattr(assets_service.yf, "Search", _boom)
+
+    with pytest.raises(SymbolSearchError):
+        assets_service._fetch_search_quotes("apple", 10)
+
+
+def test_fetch_search_quotes_returns_empty_for_non_list_quotes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive — if yfinance ever returns ``None`` or a dict for
+    ``.quotes`` (observed on edge queries), we treat it as 'no hits'
+    instead of raising."""
+
+    class _FakeSearch:
+        quotes: Any = None
+
+    monkeypatch.setattr(
+        assets_service.yf, "Search", lambda query, **kwargs: _FakeSearch()
+    )
+    assert assets_service._fetch_search_quotes("apple", 10) == []
 
 
 # ---------------------------------------------------------------------------
@@ -631,17 +616,11 @@ def test_search_symbols_caches_successful_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A second identical call within TTL must be served from the cache."""
-    calls: list[dict[str, Any]] = []
-    payload = {
-        "quotes": [
-            {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY"},
-        ]
-    }
-    _patch_search(
-        monkeypatch,
-        response=_FakeResponse(json_payload=payload),
-        calls=calls,
-    )
+    calls: list[tuple[str, int]] = []
+    quotes = [
+        {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY"},
+    ]
+    _patch_search(monkeypatch, quotes=quotes, calls=calls)
 
     first = assets_service.search_symbols("apple")
     second = assets_service.search_symbols("apple")
@@ -655,17 +634,11 @@ def test_search_symbols_cache_is_case_insensitive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """'APPLE' / 'apple' / 'Apple' must all hit the same cache slot."""
-    calls: list[dict[str, Any]] = []
-    payload = {
-        "quotes": [
-            {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY"},
-        ]
-    }
-    _patch_search(
-        monkeypatch,
-        response=_FakeResponse(json_payload=payload),
-        calls=calls,
-    )
+    calls: list[tuple[str, int]] = []
+    quotes = [
+        {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY"},
+    ]
+    _patch_search(monkeypatch, quotes=quotes, calls=calls)
 
     assets_service.search_symbols("APPLE")
     assets_service.search_symbols("apple")
@@ -679,18 +652,12 @@ def test_search_symbols_cache_separates_by_limit(
 ) -> None:
     """Different limits must not share a cache entry — a limit=5 result
     cannot satisfy a limit=10 request."""
-    calls: list[dict[str, Any]] = []
-    payload = {
-        "quotes": [
-            {"symbol": f"SYM{i}", "shortname": f"Thing {i}", "quoteType": "EQUITY"}
-            for i in range(15)
-        ]
-    }
-    _patch_search(
-        monkeypatch,
-        response=_FakeResponse(json_payload=payload),
-        calls=calls,
-    )
+    calls: list[tuple[str, int]] = []
+    quotes = [
+        {"symbol": f"SYM{i}", "shortname": f"Thing {i}", "quoteType": "EQUITY"}
+        for i in range(15)
+    ]
+    _patch_search(monkeypatch, quotes=quotes, calls=calls)
 
     assets_service.search_symbols("s", limit=5)
     assets_service.search_symbols("s", limit=10)
@@ -706,18 +673,11 @@ def test_search_symbols_cache_expires_after_ttl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Entries older than TTL must be evicted and re-fetched."""
-    calls: list[dict[str, Any]] = []
-    _patch_search(
-        monkeypatch,
-        response=_FakeResponse(
-            json_payload={
-                "quotes": [
-                    {"symbol": "AAPL", "shortname": "Apple", "quoteType": "EQUITY"},
-                ]
-            }
-        ),
-        calls=calls,
-    )
+    calls: list[tuple[str, int]] = []
+    quotes = [
+        {"symbol": "AAPL", "shortname": "Apple", "quoteType": "EQUITY"},
+    ]
+    _patch_search(monkeypatch, quotes=quotes, calls=calls)
 
     # Fake clock we control. The cache reads ``time.monotonic`` from the
     # ``time`` module imported inside ``sidecar.services.assets``.
@@ -752,27 +712,28 @@ def test_search_symbols_does_not_cache_errors(
     and can return a successful payload."""
     from sidecar.services.assets import SymbolSearchError
 
-    responses: list[_FakeResponse] = [
-        _FakeResponse(status_code=503),
-        _FakeResponse(
-            json_payload={
-                "quotes": [
-                    {"symbol": "AAPL", "shortname": "Apple", "quoteType": "EQUITY"},
-                ]
-            }
-        ),
+    # Stateful fake: first call raises, second returns a successful payload.
+    # Exercises the "error path must not write to the cache" invariant —
+    # if it did, the second call would be served from the cache and the
+    # success payload would never flow through.
+    calls: list[tuple[str, int]] = []
+    success_quotes = [
+        {"symbol": "AAPL", "shortname": "Apple", "quoteType": "EQUITY"},
     ]
 
-    def _get(url: str, **kwargs: Any) -> _FakeResponse:
-        return responses.pop(0)
+    def _fetch(query: str, limit: int) -> list[Any]:
+        calls.append((query, limit))
+        if len(calls) == 1:
+            raise SymbolSearchError("upstream transient failure")
+        return success_quotes
 
-    monkeypatch.setattr(assets_service.requests, "get", _get)
+    monkeypatch.setattr(assets_service, "_fetch_search_quotes", _fetch)
 
     with pytest.raises(SymbolSearchError):
         assets_service.search_symbols("apple")
 
     hits = assets_service.search_symbols("apple")
     assert [h.symbol for h in hits] == ["AAPL"]
-    # Both fakes were consumed — the second call actually hit the upstream,
-    # which is the entire point of this test.
-    assert responses == []
+    # Both fetches actually happened — the second wasn't short-circuited by
+    # a poisoned cache entry, which is the entire point of this test.
+    assert len(calls) == 2

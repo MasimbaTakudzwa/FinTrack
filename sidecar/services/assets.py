@@ -18,7 +18,6 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import requests
 import yfinance as yf
 from sqlalchemy import func, select
 
@@ -301,24 +300,9 @@ def add_asset(raw: str) -> AddAssetResult:
 # Symbol search (name-based autocomplete)
 # ---------------------------------------------------------------------------
 
-# Yahoo's search endpoint — same one yfinance uses internally. Free, no auth.
-# ``quotesCount`` caps results; ``newsCount=0`` drops the news section we
-# don't need. ``?q=`` accepts company names, partial names, tickers, CUSIPs.
-_YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
-_SEARCH_TIMEOUT_SECONDS = 4.0
 _SEARCH_MAX_LIMIT = 20
 _SEARCH_MIN_QUERY_LEN = 1
 _SEARCH_MAX_QUERY_LEN = 64
-
-# Browser-ish UA. Yahoo sometimes serves a challenge/redirect to unidentified
-# clients; an explicit UA keeps the response JSON-shaped and cheap.
-_SEARCH_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json,text/plain,*/*",
-}
 
 # ---------------------------------------------------------------------------
 # Search cache
@@ -383,6 +367,43 @@ def _reset_search_cache() -> None:
         _search_cache.clear()
 
 
+def _fetch_search_quotes(query: str, limit: int) -> list[Any]:
+    """Raw Yahoo search quote dicts for ``query``, capped at ``limit``.
+
+    Uses yfinance's ``Search`` helper because the bare
+    ``/v1/finance/search`` endpoint 429s aggressively for unauthenticated
+    IPs — yfinance carries the same cookie + crumb that makes our
+    ``Ticker``-based price ingestion work. No extra dep; yfinance is
+    already shipped for price/info fetching.
+
+    Isolated from :func:`search_symbols` so tests can monkeypatch it
+    directly without stubbing yfinance's class hierarchy.
+
+    Raises:
+        SymbolSearchError: yfinance could not complete the search
+            (network error, upstream block, unparsable response).
+    """
+    try:
+        result = yf.Search(
+            query,
+            max_results=limit,
+            news_count=0,
+            enable_fuzzy_query=False,
+        )
+        quotes = result.quotes
+    except Exception as exc:
+        # yfinance can raise anything from requests.HTTPError to
+        # JSONDecodeError to bare KeyError depending on what Yahoo
+        # returned. Collapse to a single error the API layer can map
+        # cleanly to HTTP 502.
+        raise SymbolSearchError(
+            f"search upstream unreachable: {exc}"
+        ) from exc
+    if not isinstance(quotes, list):
+        return []
+    return quotes
+
+
 def search_symbols(query: str, limit: int = 10) -> list[SymbolSearchHit]:
     """Search Yahoo Finance for symbols matching a free-text query.
 
@@ -400,7 +421,8 @@ def search_symbols(query: str, limit: int = 10) -> list[SymbolSearchHit]:
 
     Raises:
         AssetServiceError: invalid query (empty, too long, bad limit).
-        SymbolSearchError: Yahoo endpoint unreachable / returned bad JSON.
+        SymbolSearchError: Yahoo endpoint unreachable or returned a shape
+            we can't parse.
     """
     q = query.strip()
     if len(q) < _SEARCH_MIN_QUERY_LEN:
@@ -423,40 +445,7 @@ def search_symbols(query: str, limit: int = 10) -> list[SymbolSearchHit]:
     if cached is not None:
         return cached
 
-    # ``params`` is annotated str→str|int (not Any) to satisfy requests' stubs.
-    params: dict[str, str | int] = {
-        "q": q,
-        "quotesCount": limit,
-        "newsCount": 0,
-        "lang": "en-US",
-        "region": "US",
-    }
-    try:
-        resp = requests.get(
-            _YAHOO_SEARCH_URL,
-            params=params,
-            headers=_SEARCH_HEADERS,
-            timeout=_SEARCH_TIMEOUT_SECONDS,
-        )
-    except requests.RequestException as exc:
-        raise SymbolSearchError(
-            f"search upstream unreachable: {exc}"
-        ) from exc
-
-    if resp.status_code != 200:
-        raise SymbolSearchError(
-            f"search upstream returned HTTP {resp.status_code}"
-        )
-
-    try:
-        payload = resp.json()
-    except ValueError as exc:
-        raise SymbolSearchError("search upstream returned non-JSON") from exc
-
-    quotes = payload.get("quotes") if isinstance(payload, dict) else None
-    if not isinstance(quotes, list):
-        # No hits — treat as empty, not an error.
-        return []
+    quotes = _fetch_search_quotes(q, limit)
 
     seen: set[str] = set()
     hits: list[SymbolSearchHit] = []
