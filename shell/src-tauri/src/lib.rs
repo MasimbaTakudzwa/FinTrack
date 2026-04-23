@@ -51,6 +51,14 @@ fn venv_python(root: &Path) -> PathBuf {
 /// caller falls back to the `.venv/bin/python` spawn path. Hot-reload on the
 /// Python side stays intact — no need to re-freeze on every edit.
 fn find_frozen_sidecar(app: &AppHandle) -> Option<PathBuf> {
+    // In debug builds, always prefer the dev venv — even when a contributor has
+    // run PyInstaller locally and a `dist/fintrack-sidecar/` exists at repo
+    // root, we want `pnpm tauri dev` to use the venv for fast boot + hot
+    // reload. The frozen binary boots ~30 s on a populated prod DB (vs ~2 s
+    // for the venv). Release builds still use the bundled frozen binary.
+    if cfg!(debug_assertions) {
+        return None;
+    }
     let binary_name = if cfg!(windows) {
         "fintrack-sidecar.exe"
     } else {
