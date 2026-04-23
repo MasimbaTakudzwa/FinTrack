@@ -1,6 +1,6 @@
 [project]
 name = "fintrack-sidecar"
-version = "0.1.0"
+version = "0.1.1"
 description = "FinTrack desktop app Python sidecar (FastAPI + SQLite + APScheduler)"
 requires-python = ">=3.11"
 readme = "README.md"
