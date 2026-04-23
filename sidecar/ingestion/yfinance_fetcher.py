@@ -155,15 +155,22 @@ def fetch_prices(
     if df is None or df.empty:
         return []
 
+    # yfinance >= 0.2.66 returns MultiIndex-columned frames whenever
+    # ``group_by="ticker"`` is set — including the single-symbol case,
+    # where columns come back as ``[('AAPL','Open'), ('AAPL','High'), ...]``
+    # instead of the old flat ``['Open','High',...]`` shape. Always try
+    # ``df[sym]`` first (unwraps the outer level); fall back to the raw
+    # frame only when that KeyErrors, which covers both the flat
+    # single-symbol shape and any future yfinance revert.
     all_bars: list[PriceBar] = []
-    if len(unique) == 1:
-        all_bars.extend(_bars_for_symbol(unique[0], df))
-    else:
-        for sym in unique:
-            try:
-                sub = df[sym]
-            except KeyError:
+    for sym in unique:
+        try:
+            sub = df[sym]
+        except KeyError:
+            if len(unique) == 1:
+                sub = df
+            else:
                 logger.warning("yfinance frame missing symbol %s", sym)
                 continue
-            all_bars.extend(_bars_for_symbol(sym, sub))
+        all_bars.extend(_bars_for_symbol(sym, sub))
     return all_bars

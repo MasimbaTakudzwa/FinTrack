@@ -251,10 +251,12 @@ def test_add_asset_persists_and_runs_ingest(
         info={"longName": "Palantir Technologies"},
     )
 
-    calls: list[list[str]] = []
+    calls: list[tuple[list[str], str, str]] = []
 
-    def _fake_ingest(symbols: list[str]) -> int:
-        calls.append(list(symbols))
+    def _fake_ingest(
+        symbols: list[str], *, period: str = "1d", interval: str = "5m"
+    ) -> int:
+        calls.append((list(symbols), period, interval))
         return 42
 
     # Patch at the import source — add_asset imports the symbol lazily.
@@ -267,7 +269,11 @@ def test_add_asset_persists_and_runs_ingest(
     assert result.name == "Palantir Technologies"
     assert result.asset_type is AssetType.STOCK
     assert result.bars_ingested == 42
-    assert calls == [["PLTR"]]
+    # add_asset must request a 60-day/5-minute backfill, not the scheduler's
+    # 1-day default — otherwise the chart only has today's bars and every
+    # timeframe longer than ~1H reads "no data" right after the user clicks
+    # Add.
+    assert calls == [(["PLTR"], "60d", "5m")]
 
     with session_scope() as s:
         from sqlalchemy import select
@@ -304,7 +310,9 @@ def test_add_asset_ingest_failure_is_non_fatal(
         info={"longName": "Novel Co"},
     )
 
-    def _boom(symbols: list[str]) -> int:
+    def _boom(
+        symbols: list[str], *, period: str = "1d", interval: str = "5m"
+    ) -> int:
         raise RuntimeError("yahoo melted")
 
     import sidecar.scheduler.jobs as jobs_module

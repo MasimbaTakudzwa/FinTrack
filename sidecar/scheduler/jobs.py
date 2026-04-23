@@ -65,13 +65,18 @@ def _upsert_bars(session: Session, symbol_to_id: dict[str, int], bars: list[Pric
     return result.rowcount or 0
 
 
-def ingest_prices_for_symbols(symbols: Sequence[str]) -> int:
+def ingest_prices_for_symbols(
+    symbols: Sequence[str],
+    *,
+    period: str = "1d",
+    interval: str = "5m",
+) -> int:
     """Fetch and persist OHLCV bars for an explicit list of symbols.
 
     Used both by the scheduled ``ingest_prices`` job (which passes every
-    active asset symbol) and by the "add asset" flow (which passes a single
-    newly-resolved symbol so the user sees bars immediately instead of
-    waiting up to 5 minutes for the next scheduler tick).
+    active asset symbol with the defaults — a minimal incremental tick) and
+    by the "add asset" flow (which passes ``period="60d", interval="5m"`` so
+    the user gets ~60 days of history on add, not just the last few bars).
 
     Returns the number of newly inserted PricePoint rows.
     """
@@ -80,7 +85,7 @@ def ingest_prices_for_symbols(symbols: Sequence[str]) -> int:
         return 0
 
     try:
-        bars = fetch_prices(unique)
+        bars = fetch_prices(unique, period=period, interval=interval)
     except FetcherError as exc:
         logger.error("ingest_prices_for_symbols: fetch failed for %s: %s", unique, exc)
         return 0

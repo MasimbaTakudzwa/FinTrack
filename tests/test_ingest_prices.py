@@ -44,7 +44,7 @@ def test_ingest_prices_inserts_bars(
 
     from sidecar.scheduler import jobs
 
-    monkeypatch.setattr(jobs, "fetch_prices", lambda symbols: bars)
+    monkeypatch.setattr(jobs, "fetch_prices", lambda symbols, **_kw: bars)
 
     inserted = jobs.ingest_prices()
     assert inserted == 5
@@ -63,7 +63,7 @@ def test_ingest_prices_is_idempotent(
 
     from sidecar.scheduler import jobs
 
-    monkeypatch.setattr(jobs, "fetch_prices", lambda symbols: bars)
+    monkeypatch.setattr(jobs, "fetch_prices", lambda symbols, **_kw: bars)
 
     first = jobs.ingest_prices()
     second = jobs.ingest_prices()
@@ -84,7 +84,7 @@ def test_ingest_prices_skips_unknown_symbols(
 
     from sidecar.scheduler import jobs
 
-    monkeypatch.setattr(jobs, "fetch_prices", lambda symbols: bars)
+    monkeypatch.setattr(jobs, "fetch_prices", lambda symbols, **_kw: bars)
 
     inserted = jobs.ingest_prices()
     assert inserted == 2
@@ -97,7 +97,9 @@ def test_ingest_prices_with_no_assets(
 
     called = {"count": 0}
 
-    def _fake_fetch(symbols: object) -> list[PriceBar]:
+    def _fake_fetch(
+        symbols: object, *, period: str = "1d", interval: str = "5m"
+    ) -> list[PriceBar]:
         called["count"] += 1
         return []
 
@@ -106,3 +108,30 @@ def test_ingest_prices_with_no_assets(
     inserted = jobs.ingest_prices()
     assert inserted == 0
     assert called["count"] == 0
+
+
+def test_ingest_prices_for_symbols_forwards_period_and_interval(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The on-add backfill path passes ``period=60d, interval=5m``; the
+    scheduled tick passes the defaults. Lock both in at this boundary so
+    a future caller can't silently drop the kwargs.
+    """
+    _seed_assets()
+    calls: list[tuple[str, str]] = []
+
+    def _fake_fetch(
+        symbols: object, *, period: str = "1d", interval: str = "5m"
+    ) -> list[PriceBar]:
+        calls.append((period, interval))
+        return []
+
+    from sidecar.scheduler import jobs
+
+    monkeypatch.setattr(jobs, "fetch_prices", _fake_fetch)
+
+    jobs.ingest_prices_for_symbols(["AAPL"])  # default
+    jobs.ingest_prices_for_symbols(["AAPL"], period="60d", interval="5m")
+    jobs.ingest_prices_for_symbols(["AAPL"], period="1y", interval="1d")
+
+    assert calls == [("1d", "5m"), ("60d", "5m"), ("1y", "1d")]
