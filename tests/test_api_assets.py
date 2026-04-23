@@ -511,3 +511,129 @@ def test_create_asset_ingest_failure_returns_zero_bars(
     r = client.post("/api/assets/", json={"symbol": "THING"})
     assert r.status_code == 201
     assert r.json()["bars_ingested"] == 0
+
+
+# ---------------------------------------------------------------------------
+# GET /api/assets/search/
+# ---------------------------------------------------------------------------
+
+
+def _patch_search_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    hits: list[Any] | None = None,
+    exc: BaseException | None = None,
+) -> None:
+    """Replace the module-level ``search_symbols`` used by the API route."""
+    from sidecar.services.assets import SymbolSearchHit
+
+    resolved_hits = hits if hits is not None else []
+
+    def _search(query: str, limit: int = 10) -> list[SymbolSearchHit]:
+        if exc is not None:
+            raise exc
+        return list(resolved_hits)
+
+    import sidecar.api.assets as api_assets
+
+    monkeypatch.setattr(api_assets, "search_symbols", _search)
+
+
+def test_search_assets_returns_results(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sidecar.services.assets import SymbolSearchHit
+
+    _patch_search_symbols(
+        monkeypatch,
+        hits=[
+            SymbolSearchHit(
+                symbol="AAPL",
+                name="Apple Inc.",
+                asset_type=AssetType.STOCK,
+                exchange="NASDAQ",
+            ),
+            SymbolSearchHit(
+                symbol="APLE",
+                name="Apple Hospitality REIT",
+                asset_type=AssetType.STOCK,
+                exchange="NYSE",
+            ),
+        ],
+    )
+
+    client = TestClient(app)
+    r = client.get("/api/assets/search/", params={"q": "apple"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["query"] == "apple"
+    assert len(body["results"]) == 2
+    assert body["results"][0]["symbol"] == "AAPL"
+    assert body["results"][0]["name"] == "Apple Inc."
+    assert body["results"][0]["asset_type"] == "stock"
+    assert body["results"][0]["exchange"] == "NASDAQ"
+
+
+def test_search_assets_empty_results(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_search_symbols(monkeypatch, hits=[])
+    client = TestClient(app)
+    r = client.get("/api/assets/search/", params={"q": "zxyq"})
+    assert r.status_code == 200
+    assert r.json() == {"query": "zxyq", "results": []}
+
+
+def test_search_assets_validation_422(isolated_db: Path) -> None:
+    client = TestClient(app)
+    # empty q — Query(min_length=1)
+    r = client.get("/api/assets/search/", params={"q": ""})
+    assert r.status_code == 422
+    # limit out of range
+    r2 = client.get("/api/assets/search/", params={"q": "aapl", "limit": 0})
+    assert r2.status_code == 422
+    r3 = client.get("/api/assets/search/", params={"q": "aapl", "limit": 100})
+    assert r3.status_code == 422
+
+
+def test_search_assets_upstream_error_502(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sidecar.services.assets import SymbolSearchError
+
+    _patch_search_symbols(monkeypatch, exc=SymbolSearchError("yahoo blew up"))
+    client = TestClient(app)
+    r = client.get("/api/assets/search/", params={"q": "aapl"})
+    assert r.status_code == 502
+    assert "yahoo blew up" in r.json()["detail"]
+
+
+def test_search_assets_service_validation_400(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``AssetServiceError`` from the service (not Pydantic) → 400."""
+    from sidecar.services.assets import AssetServiceError
+
+    _patch_search_symbols(monkeypatch, exc=AssetServiceError("bad limit"))
+    client = TestClient(app)
+    r = client.get("/api/assets/search/", params={"q": "aapl"})
+    assert r.status_code == 400
+
+
+def test_search_assets_forwards_limit(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _search(query: str, limit: int = 10) -> list[Any]:
+        captured["query"] = query
+        captured["limit"] = limit
+        return []
+
+    import sidecar.api.assets as api_assets
+
+    monkeypatch.setattr(api_assets, "search_symbols", _search)
+    client = TestClient(app)
+    r = client.get("/api/assets/search/", params={"q": "btc", "limit": 7})
+    assert r.status_code == 200
+    assert captured == {"query": "btc", "limit": 7}

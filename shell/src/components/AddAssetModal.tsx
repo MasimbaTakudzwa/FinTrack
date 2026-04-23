@@ -2,16 +2,21 @@
  * "Add asset" modal.
  *
  * Two-step flow:
- *   1. User types a symbol + clicks Lookup (or presses Enter) → POST /api/assets/lookup/
- *      Shows a preview card with the resolved name, type, exchange, currency.
- *   2. User clicks Add → POST /api/assets/ → persist + kick off one-shot ingest.
+ *   1. User types in the search combobox → Yahoo Finance autocomplete →
+ *      picks a hit. This resolves the canonical ticker without requiring
+ *      the user to know it ahead of time.
+ *   2. On pick, the modal fetches `POST /api/assets/lookup/` for the full
+ *      preview (currency + final name). User clicks Add → POST /api/assets/
+ *      persists + kicks off a one-shot ingest.
  *
- * Why not auto-add on first Enter? Yahoo sometimes resolves typos to something
- * you didn't mean (e.g. "APL" resolving to a delisted ADR). The preview step
- * lets the user double-check before committing.
+ * We still keep the preview step — it confirms the currency/exchange the
+ * user is about to persist (e.g. Apple is listed on many exchanges with
+ * different suffixes; the user wants to see "USD / NASDAQ" before committing).
+ * Power users typing a full ticker like "SPY" will see SPY as the top hit
+ * and can press Enter to select it, preserving the old one-shot feel.
  */
 
-import { Plus, Search, X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import {
@@ -20,7 +25,9 @@ import {
   ApiError,
   createAsset,
   lookupAsset,
+  type SymbolSearchHit,
 } from "../api/client";
+import { AssetSearchCombo } from "./AssetSearchCombo";
 
 interface AddAssetModalProps {
   onClose: () => void;
@@ -53,9 +60,9 @@ export function AddAssetModal({
   addToDefaultWatchlist = true,
   watchlistId = null,
 }: AddAssetModalProps) {
-  const [symbol, setSymbol] = useState("");
+  const [selectedHit, setSelectedHit] = useState<SymbolSearchHit | null>(null);
   const [preview, setPreview] = useState<AssetLookup | null>(null);
-  const [lookingUp, setLookingUp] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -67,27 +74,25 @@ export function AddAssetModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const normalised = symbol.trim().toUpperCase();
-  // Invalidate the preview card whenever the typed symbol diverges from it.
-  const previewMatchesInput = preview?.symbol === normalised;
-
-  const doLookup = () => {
-    if (!normalised || lookingUp) return;
-    setLookingUp(true);
+  const onPickHit = (hit: SymbolSearchHit) => {
+    setSelectedHit(hit);
     setError(null);
     setPreview(null);
-    lookupAsset(normalised)
+    setPreviewLoading(true);
+    lookupAsset(hit.symbol)
       .then((lu) => setPreview(lu))
       .catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 404) {
-          setError(`Symbol "${normalised}" not found on Yahoo Finance.`);
+          setError(
+            `Yahoo Finance couldn't resolve "${hit.symbol}" right now. Try another result.`,
+          );
         } else if (err instanceof Error) {
           setError(err.message);
         } else {
           setError(String(err));
         }
       })
-      .finally(() => setLookingUp(false));
+      .finally(() => setPreviewLoading(false));
   };
 
   const doAdd = () => {
@@ -123,17 +128,6 @@ export function AddAssetModal({
       .finally(() => setAdding(false));
   };
 
-  const onSymbolKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      if (preview && previewMatchesInput) {
-        doAdd();
-      } else {
-        doLookup();
-      }
-    }
-  };
-
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/50 backdrop-blur-sm"
@@ -149,11 +143,14 @@ export function AddAssetModal({
               <Plus className="h-4 w-4" />
             </div>
             <div>
-              <h2 className="text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
+              <h2
+                id="add-asset-modal-title"
+                className="text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-100"
+              >
                 Track a new asset
               </h2>
               <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                Any symbol Yahoo Finance knows — stocks, ETFs, crypto, futures, FX.
+                Search Yahoo Finance by name or symbol — stocks, ETFs, crypto, futures, FX.
               </p>
             </div>
           </div>
@@ -169,41 +166,36 @@ export function AddAssetModal({
 
         <div className="space-y-4 px-5 py-4">
           <div>
-            <label
-              htmlFor="add-asset-symbol"
+            <div
+              id="add-asset-search-label"
               className="block text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400"
             >
-              Symbol
-            </label>
-            <div className="mt-1.5 flex gap-2">
-              <input
-                id="add-asset-symbol"
-                type="text"
-                autoFocus
-                value={symbol}
-                onChange={(e) => setSymbol(e.target.value)}
-                onKeyDown={onSymbolKey}
-                maxLength={32}
-                className="block w-full rounded-md border border-zinc-200 bg-white px-3 py-2 font-mono text-sm uppercase tracking-wide text-zinc-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
-                placeholder="AAPL, TSLA, BTC-USD, GC=F, EURUSD=X…"
-              />
-              <button
-                type="button"
-                onClick={doLookup}
-                disabled={!normalised || lookingUp}
-                className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-              >
-                <Search className="h-3.5 w-3.5" />
-                {lookingUp ? "Looking…" : "Lookup"}
-              </button>
+              Search
             </div>
-            <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
-              Tip: Yahoo suffixes are supported. <code>-USD</code> for crypto,{" "}
-              <code>=F</code> for futures, <code>=X</code> for FX pairs.
+            <div className="mt-1.5">
+              <AssetSearchCombo
+                onSelect={onPickHit}
+                autoFocus
+                aria-labelledby="add-asset-search-label"
+              />
+            </div>
+            <p className="mt-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
+              Try "apple", "bitcoin", "gold futures", or an exact symbol like{" "}
+              <code>SPY</code>.
             </p>
           </div>
 
-          {preview && previewMatchesInput && (
+          {selectedHit && previewLoading && (
+            <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+              Loading preview for{" "}
+              <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                {selectedHit.symbol}
+              </span>
+              …
+            </div>
+          )}
+
+          {preview && (
             <div className="rounded-md border border-indigo-200 bg-indigo-50 p-3 dark:border-indigo-900 dark:bg-indigo-950/50">
               <div className="flex items-baseline justify-between">
                 <span className="font-mono text-sm font-semibold text-zinc-900 dark:text-zinc-100">
@@ -255,10 +247,10 @@ export function AddAssetModal({
           <button
             type="button"
             onClick={doAdd}
-            disabled={!preview || !previewMatchesInput || adding}
+            disabled={!preview || previewLoading || adding}
             className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50 disabled:hover:bg-indigo-600"
           >
-            {adding ? "Adding…" : "Add asset"}
+            {adding ? "Adding…" : preview ? `Add ${preview.symbol}` : "Add asset"}
           </button>
         </div>
       </div>

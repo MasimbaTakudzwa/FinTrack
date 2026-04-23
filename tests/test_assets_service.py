@@ -367,3 +367,242 @@ def test_add_asset_propagates_resolve_errors(
 
     with pytest.raises(SymbolNotFoundError):
         add_asset("GARBAGE")
+
+
+# ---------------------------------------------------------------------------
+# search_symbols
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    """Bare-minimum ``requests.Response`` stand-in."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        json_payload: Any | None = None,
+        raise_on_json: bool = False,
+    ) -> None:
+        self.status_code = status_code
+        self._json_payload = json_payload
+        self._raise_on_json = raise_on_json
+
+    def json(self) -> Any:
+        if self._raise_on_json:
+            raise ValueError("not JSON")
+        return self._json_payload
+
+
+def _patch_search(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    response: _FakeResponse | None = None,
+    exc: BaseException | None = None,
+    calls: list[dict[str, Any]] | None = None,
+) -> None:
+    """Replace ``requests.get`` used by :func:`search_symbols`."""
+
+    def _get(url: str, **kwargs: Any) -> _FakeResponse:
+        if calls is not None:
+            calls.append({"url": url, **kwargs})
+        if exc is not None:
+            raise exc
+        assert response is not None
+        return response
+
+    monkeypatch.setattr(assets_service.requests, "get", _get)
+
+
+def test_search_symbols_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "quotes": [
+            {
+                "symbol": "AAPL",
+                "shortname": "Apple Inc.",
+                "longname": "Apple Inc.",
+                "quoteType": "EQUITY",
+                "exchDisp": "NASDAQ",
+            },
+            {
+                "symbol": "APLE",
+                "shortname": "Apple Hospitality REIT",
+                "quoteType": "EQUITY",
+                "exchDisp": "NYSE",
+            },
+        ]
+    }
+    _patch_search(monkeypatch, response=_FakeResponse(json_payload=payload))
+
+    hits = assets_service.search_symbols("apple")
+    assert len(hits) == 2
+    assert hits[0].symbol == "AAPL"
+    assert hits[0].name == "Apple Inc."
+    assert hits[0].asset_type == AssetType.STOCK
+    assert hits[0].exchange == "NASDAQ"
+    assert hits[1].symbol == "APLE"
+    # shortname fallback when longname is missing
+    assert hits[1].name == "Apple Hospitality REIT"
+
+
+def test_search_symbols_maps_quote_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "quotes": [
+            {"symbol": "BTC-USD", "shortname": "Bitcoin", "quoteType": "CRYPTOCURRENCY"},
+            {"symbol": "SPY", "shortname": "SPDR S&P 500", "quoteType": "ETF"},
+            {"symbol": "^GSPC", "shortname": "S&P 500", "quoteType": "INDEX"},
+            {"symbol": "CL=F", "shortname": "Crude Oil", "quoteType": "FUTURE"},
+        ]
+    }
+    _patch_search(monkeypatch, response=_FakeResponse(json_payload=payload))
+
+    hits = assets_service.search_symbols("a")
+    by_sym = {h.symbol: h.asset_type for h in hits}
+    assert by_sym == {
+        "BTC-USD": AssetType.CRYPTO,
+        "SPY": AssetType.ETF,
+        "^GSPC": AssetType.INDEX,
+        "CL=F": AssetType.COMMODITY,
+    }
+
+
+def test_search_symbols_dedupes_on_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Yahoo sometimes returns the same symbol across multiple exchanges."""
+    payload = {
+        "quotes": [
+            {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY", "exchDisp": "NASDAQ"},
+            {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY", "exchDisp": "NEO"},
+        ]
+    }
+    _patch_search(monkeypatch, response=_FakeResponse(json_payload=payload))
+
+    hits = assets_service.search_symbols("apple")
+    assert len(hits) == 1
+    assert hits[0].exchange == "NASDAQ"  # first wins
+
+
+def test_search_symbols_skips_malformed_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "quotes": [
+            {"quoteType": "EQUITY"},  # missing symbol
+            {"symbol": "AAPL"},  # missing quoteType
+            {"symbol": 42, "quoteType": "EQUITY"},  # non-string symbol
+            "not a dict",
+            {"symbol": "TSLA", "shortname": "Tesla", "quoteType": "EQUITY"},
+        ]
+    }
+    _patch_search(monkeypatch, response=_FakeResponse(json_payload=payload))
+
+    hits = assets_service.search_symbols("test")
+    assert [h.symbol for h in hits] == ["TSLA"]
+
+
+def test_search_symbols_respects_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "quotes": [
+            {"symbol": f"SYM{i}", "shortname": f"Thing {i}", "quoteType": "EQUITY"}
+            for i in range(15)
+        ]
+    }
+    _patch_search(monkeypatch, response=_FakeResponse(json_payload=payload))
+
+    hits = assets_service.search_symbols("s", limit=5)
+    assert len(hits) == 5
+    assert [h.symbol for h in hits] == [f"SYM{i}" for i in range(5)]
+
+
+def test_search_symbols_empty_payload_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_search(monkeypatch, response=_FakeResponse(json_payload={"quotes": []}))
+    assert assets_service.search_symbols("xyzzy") == []
+
+
+def test_search_symbols_missing_quotes_key_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_search(monkeypatch, response=_FakeResponse(json_payload={"news": []}))
+    assert assets_service.search_symbols("xyzzy") == []
+
+
+def test_search_symbols_rejects_empty_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Stub requests so a leaked network call would be loud.
+    _patch_search(monkeypatch, response=_FakeResponse(json_payload={"quotes": []}))
+    with pytest.raises(AssetServiceError):
+        assets_service.search_symbols("")
+    with pytest.raises(AssetServiceError):
+        assets_service.search_symbols("   ")
+
+
+def test_search_symbols_rejects_too_long_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_search(monkeypatch, response=_FakeResponse(json_payload={"quotes": []}))
+    with pytest.raises(AssetServiceError):
+        assets_service.search_symbols("a" * 100)
+
+
+def test_search_symbols_rejects_bad_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_search(monkeypatch, response=_FakeResponse(json_payload={"quotes": []}))
+    with pytest.raises(AssetServiceError):
+        assets_service.search_symbols("aapl", limit=0)
+    with pytest.raises(AssetServiceError):
+        assets_service.search_symbols("aapl", limit=1000)
+
+
+def test_search_symbols_http_error_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sidecar.services.assets import SymbolSearchError
+
+    _patch_search(monkeypatch, response=_FakeResponse(status_code=503))
+    with pytest.raises(SymbolSearchError):
+        assets_service.search_symbols("aapl")
+
+
+def test_search_symbols_network_error_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import requests as real_requests
+
+    from sidecar.services.assets import SymbolSearchError
+
+    _patch_search(monkeypatch, exc=real_requests.ConnectionError("DNS down"))
+    with pytest.raises(SymbolSearchError):
+        assets_service.search_symbols("aapl")
+
+
+def test_search_symbols_bad_json_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sidecar.services.assets import SymbolSearchError
+
+    _patch_search(
+        monkeypatch,
+        response=_FakeResponse(json_payload=None, raise_on_json=True),
+    )
+    with pytest.raises(SymbolSearchError):
+        assets_service.search_symbols("aapl")
+
+
+def test_search_symbols_forwards_query_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    _patch_search(
+        monkeypatch,
+        response=_FakeResponse(json_payload={"quotes": []}),
+        calls=calls,
+    )
+    assets_service.search_symbols("BTC-USD", limit=7)
+    assert len(calls) == 1
+    params = calls[0]["params"]
+    assert params["q"] == "BTC-USD"
+    assert params["quotesCount"] == 7
+    assert params["newsCount"] == 0

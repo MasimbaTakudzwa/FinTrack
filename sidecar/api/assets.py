@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
@@ -34,8 +35,10 @@ from sidecar.db.models import Asset, AssetType
 from sidecar.services.assets import (
     AssetServiceError,
     SymbolNotFoundError,
+    SymbolSearchError,
     add_asset,
     resolve_symbol,
+    search_symbols,
 )
 from sidecar.services.watchlists import (
     ItemAlreadyExistsError,
@@ -99,6 +102,18 @@ class CreateAssetOut(BaseModel):
     newly_added: bool
 
 
+class SearchHitOut(BaseModel):
+    symbol: str
+    name: str
+    asset_type: AssetType
+    exchange: str | None
+
+
+class SearchOut(BaseModel):
+    query: str
+    results: list[SearchHitOut]
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -112,6 +127,41 @@ def list_assets(active_only: bool = True) -> list[AssetOut]:
             stmt = stmt.where(Asset.is_active.is_(True))
         rows = s.execute(stmt).scalars().all()
         return [AssetOut.model_validate(a) for a in rows]
+
+
+@router.get("/search/", response_model=SearchOut)
+def search_assets_route(
+    q: Annotated[str, Query(min_length=1, max_length=64, description="Free-text query (company name, partial ticker, CUSIP).")],
+    limit: Annotated[int, Query(ge=1, le=20)] = 10,
+) -> SearchOut:
+    """Autocomplete-style symbol search against Yahoo Finance.
+
+    Lets users type "apple" or "bitcoin" and pick from a ranked dropdown
+    — no need to know the ticker. Selection drives the existing
+    ``/api/assets/lookup/`` preview + ``POST /api/assets/`` persist flow.
+
+    Error mapping:
+    - 400 — empty / too-long query, out-of-range limit
+    - 502 — Yahoo search upstream unreachable or malformed response
+    """
+    try:
+        hits = search_symbols(q, limit=limit)
+    except SymbolSearchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except AssetServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return SearchOut(
+        query=q,
+        results=[
+            SearchHitOut(
+                symbol=h.symbol,
+                name=h.name,
+                asset_type=h.asset_type,
+                exchange=h.exchange,
+            )
+            for h in hits
+        ],
+    )
 
 
 @router.post("/lookup/", response_model=LookupOut)

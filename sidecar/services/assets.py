@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+import requests
 import yfinance as yf
 from sqlalchemy import func, select
 
@@ -45,6 +46,10 @@ class AssetAlreadyExistsError(AssetServiceError):
     """
 
 
+class SymbolSearchError(AssetServiceError):
+    """Yahoo's search endpoint was unreachable or returned an unusable shape."""
+
+
 @dataclass(frozen=True)
 class ResolvedSymbol:
     """The minimal set of facts we need from Yahoo before persisting."""
@@ -68,6 +73,23 @@ class AddAssetResult:
     # existing row as-is, and did NOT run a 60-day re-ingest. Callers
     # that want "create or fail" semantics can branch on this.
     newly_added: bool
+
+
+@dataclass(frozen=True)
+class SymbolSearchHit:
+    """A single Yahoo Finance search autocomplete result.
+
+    Deliberately thinner than :class:`ResolvedSymbol` — we don't hit the
+    (slow) per-symbol ``info``/``fast_info`` endpoints here. Resolution
+    happens on click: the user picks a hit from the dropdown, the shell
+    then calls ``POST /api/assets/lookup/`` for the preview, then
+    ``POST /api/assets/`` to persist.
+    """
+
+    symbol: str
+    name: str
+    asset_type: AssetType
+    exchange: str | None
 
 
 # yfinance returns its own vocabulary for ``quoteType`` (also surfaced on
@@ -271,3 +293,131 @@ def add_asset(raw: str) -> AddAssetResult:
         bars_ingested=bars_ingested,
         newly_added=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Symbol search (name-based autocomplete)
+# ---------------------------------------------------------------------------
+
+# Yahoo's search endpoint — same one yfinance uses internally. Free, no auth.
+# ``quotesCount`` caps results; ``newsCount=0`` drops the news section we
+# don't need. ``?q=`` accepts company names, partial names, tickers, CUSIPs.
+_YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
+_SEARCH_TIMEOUT_SECONDS = 4.0
+_SEARCH_MAX_LIMIT = 20
+_SEARCH_MIN_QUERY_LEN = 1
+_SEARCH_MAX_QUERY_LEN = 64
+
+# Browser-ish UA. Yahoo sometimes serves a challenge/redirect to unidentified
+# clients; an explicit UA keeps the response JSON-shaped and cheap.
+_SEARCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/plain,*/*",
+}
+
+
+def search_symbols(query: str, limit: int = 10) -> list[SymbolSearchHit]:
+    """Search Yahoo Finance for symbols matching a free-text query.
+
+    Users shouldn't need to know tickers — they type "apple" or "bitcoin"
+    or "total return" and we show a ranked list of matching instruments.
+    Selection drives the existing lookup + persist flow.
+
+    Args:
+        query: User-supplied free text (company name, partial ticker, etc).
+        limit: Max hits to return (1-20). Clamped; server-side default 10.
+
+    Returns:
+        Up to ``limit`` hits, Yahoo's ranking preserved, deduplicated on
+        uppercased symbol. Empty list when Yahoo has no matches.
+
+    Raises:
+        AssetServiceError: invalid query (empty, too long, bad limit).
+        SymbolSearchError: Yahoo endpoint unreachable / returned bad JSON.
+    """
+    q = query.strip()
+    if len(q) < _SEARCH_MIN_QUERY_LEN:
+        raise AssetServiceError("query must not be empty")
+    if len(q) > _SEARCH_MAX_QUERY_LEN:
+        raise AssetServiceError(
+            f"query too long (max {_SEARCH_MAX_QUERY_LEN} chars)"
+        )
+    if limit < 1 or limit > _SEARCH_MAX_LIMIT:
+        raise AssetServiceError(
+            f"limit out of range (1..{_SEARCH_MAX_LIMIT})"
+        )
+
+    # ``params`` is annotated str→str|int (not Any) to satisfy requests' stubs.
+    params: dict[str, str | int] = {
+        "q": q,
+        "quotesCount": limit,
+        "newsCount": 0,
+        "lang": "en-US",
+        "region": "US",
+    }
+    try:
+        resp = requests.get(
+            _YAHOO_SEARCH_URL,
+            params=params,
+            headers=_SEARCH_HEADERS,
+            timeout=_SEARCH_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as exc:
+        raise SymbolSearchError(
+            f"search upstream unreachable: {exc}"
+        ) from exc
+
+    if resp.status_code != 200:
+        raise SymbolSearchError(
+            f"search upstream returned HTTP {resp.status_code}"
+        )
+
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise SymbolSearchError("search upstream returned non-JSON") from exc
+
+    quotes = payload.get("quotes") if isinstance(payload, dict) else None
+    if not isinstance(quotes, list):
+        # No hits — treat as empty, not an error.
+        return []
+
+    seen: set[str] = set()
+    hits: list[SymbolSearchHit] = []
+    for q_entry in quotes:
+        if not isinstance(q_entry, dict):
+            continue
+        symbol = q_entry.get("symbol")
+        if not isinstance(symbol, str):
+            continue
+        sym_up = symbol.strip().upper()
+        if not sym_up or sym_up in seen:
+            continue
+        # Drop results that aren't instruments we can track. Yahoo sometimes
+        # returns currencies-as-quotes with ``quoteType`` we'd otherwise map
+        # to ``stock`` incorrectly; the map already handles this, but we skip
+        # entries that have no quote_type at all (typically news spillover).
+        quote_type_raw = q_entry.get("quoteType")
+        if not isinstance(quote_type_raw, str) or not quote_type_raw:
+            continue
+        # Prefer longname for display; fall back to shortname then symbol.
+        name = (
+            str(q_entry.get("longname") or q_entry.get("shortname") or sym_up)
+            .strip()
+        )
+        exch = q_entry.get("exchDisp") or q_entry.get("exchange")
+        hits.append(
+            SymbolSearchHit(
+                symbol=sym_up,
+                name=name or sym_up,
+                asset_type=_map_quote_type(quote_type_raw),
+                exchange=str(exch) if exch else None,
+            )
+        )
+        seen.add(sym_up)
+        if len(hits) >= limit:
+            break
+    return hits

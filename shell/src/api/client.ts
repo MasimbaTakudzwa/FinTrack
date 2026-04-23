@@ -165,6 +165,31 @@ export interface AssetLookup {
   currency: string | null;
 }
 
+export interface SymbolSearchHit {
+  symbol: string;
+  name: string;
+  asset_type: AssetType;
+  exchange: string | null;
+}
+
+export interface SymbolSearchResponse {
+  query: string;
+  results: SymbolSearchHit[];
+}
+
+/** Name-based Yahoo Finance autocomplete. Users can type "apple" or "bitcoin"
+ *  instead of needing to know the ticker. Selection drives the existing
+ *  `lookupAsset` + `createAsset` flow. */
+export function searchAssets(
+  q: string,
+  opts: { limit?: number; signal?: AbortSignal } = {},
+): Promise<SymbolSearchResponse> {
+  return apiGet<SymbolSearchResponse>("/api/assets/search/", {
+    params: { q, limit: opts.limit ?? 10 },
+    signal: opts.signal,
+  });
+}
+
 export function lookupAsset(
   symbol: string,
   signal?: AbortSignal,
