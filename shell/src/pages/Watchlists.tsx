@@ -424,22 +424,22 @@ export function Watchlists() {
           onClose={() => setAddAssetOpen(false)}
           // The backend already adds to the default watchlist — which is
           // usually what you want. If the user is looking at a non-default
-          // watchlist, skip the auto-add and rely on the dropdown flow.
+          // watchlist, skip the auto-add to avoid a double-link.
           addToDefaultWatchlist={state.detail?.is_default ?? true}
-          onCreated={(asset) => {
-            void (async () => {
-              // If the user is on a non-default watchlist, also link the new
-              // asset here — that's the most intuitive outcome given the
-              // button's visual context.
-              if (state.selectedId !== null && !state.detail?.is_default) {
-                try {
-                  await addWatchlistItem(state.selectedId, asset.id);
-                } catch {
-                  // non-fatal — refresh below will surface discrepancies
-                }
-              }
-              await refreshLists(state.selectedId);
-            })();
+          // When the user clicked "Track new…" on a non-default watchlist,
+          // pass the current watchlist id so the backend also links the
+          // (possibly pre-existing) asset to it in the same POST. This is
+          // what fixes the "already tracked" bug — previously we let the
+          // POST 409, then tried to fix it client-side; now the backend is
+          // idempotent + handles the link, so one round-trip does both.
+          watchlistId={
+            state.selectedId !== null && !state.detail?.is_default
+              ? state.selectedId
+              : null
+          }
+          onCreated={() => {
+            // Backend handled persistence + linking; just re-read the list.
+            void refreshLists(state.selectedId);
           }}
         />
       )}

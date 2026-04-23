@@ -180,10 +180,27 @@ export interface CreateAssetResult {
   asset: Asset;
   bars_ingested: number;
   added_to_watchlist: boolean;
+  /**
+   * True iff the asset was freshly resolved+persisted by this call. False
+   * means it already existed in the assets table and we skipped the yfinance
+   * round-trip — the backend is idempotent on duplicate symbols, so the
+   * end-state is still "asset tracked + linked to requested watchlist(s)".
+   */
+  newly_added: boolean;
 }
 
 export function createAsset(
-  body: { symbol: string; add_to_default_watchlist?: boolean },
+  body: {
+    symbol: string;
+    add_to_default_watchlist?: boolean;
+    /**
+     * When set, the backend also links the (possibly pre-existing) asset to
+     * this watchlist. Matches the "Track new…" button on a non-default list
+     * — one POST handles both "resolve + persist" and "link to my list" so
+     * an already-tracked asset isn't surfaced as a 409.
+     */
+    watchlist_id?: number | null;
+  },
   signal?: AbortSignal,
 ): Promise<CreateAssetResult> {
   return apiPost<CreateAssetResult, typeof body>(

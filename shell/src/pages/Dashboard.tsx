@@ -225,12 +225,15 @@ export function Dashboard() {
       {addOpen && (
         <AddAssetModal
           onClose={() => setAddOpen(false)}
-          onCreated={(asset, bars, added) => {
-            const parts = [`Added ${asset.symbol} (${asset.name})`];
+          onCreated={(asset, bars, added, newlyAdded) => {
+            const head = newlyAdded
+              ? `Added ${asset.symbol} (${asset.name})`
+              : `${asset.symbol} was already tracked`;
+            const parts = [head];
             if (bars > 0) parts.push(`${bars} bars ingested`);
-            if (added) parts.push("added to default watchlist");
+            if (added) parts.push("on default watchlist");
             setAddBanner(parts.join(" · "));
-            // Refresh the dashboard so the new asset shows up immediately.
+            // Refresh the dashboard so the (possibly new) asset shows up.
             setTick((t) => t + 1);
           }}
         />

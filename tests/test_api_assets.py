@@ -287,20 +287,179 @@ def test_create_asset_unknown_symbol_404(
     assert r.status_code == 404
 
 
-def test_create_asset_duplicate_409(
+def test_create_asset_already_tracked_is_idempotent(
     isolated_db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """POSTing an already-tracked symbol returns 201 with the existing row
+    and ``newly_added=false`` instead of 409. Locks in the "Track new…"
+    flow from a non-default watchlist when the asset is already in
+    another watchlist.
+    """
     with session_scope() as s:
         s.add(Asset(symbol="AAPL", name="Apple Inc.", asset_type=AssetType.STOCK))
 
+    # Stub yfinance + ingest so we can verify the fast path DIDN'T hit them.
+    ingest_calls: list[list[str]] = []
+
+    def _spy_ingest(
+        symbols: list[str], *, period: str = "1d", interval: str = "5m"
+    ) -> int:
+        ingest_calls.append(list(symbols))
+        return 0
+
+    import sidecar.scheduler.jobs as jobs_module
+
+    monkeypatch.setattr(jobs_module, "ingest_prices_for_symbols", _spy_ingest)
+
+    def _unexpected_ticker(_sym: str) -> object:
+        raise AssertionError("resolve_symbol should not run for an existing asset")
+
+    monkeypatch.setattr(assets_service.yf, "Ticker", _unexpected_ticker)
+
+    client = TestClient(app)
+    r = client.post(
+        "/api/assets/", json={"symbol": "aapl", "add_to_default_watchlist": False}
+    )
+    assert r.status_code == 201
+    body = r.json()
+    assert body["asset"]["symbol"] == "AAPL"
+    assert body["newly_added"] is False
+    assert body["bars_ingested"] == 0
+    # Neither yfinance nor the ingest pipeline was invoked.
+    assert ingest_calls == []
+
+
+def test_create_asset_already_tracked_links_to_explicit_watchlist(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug scenario: AAPL already tracked on default. User creates a
+    second watchlist and clicks "Track new… AAPL". Backend must link it
+    to the second watchlist (NOT 409) without touching yfinance.
+    """
+    from sidecar.services.watchlists import create_watchlist
+
+    default = create_watchlist("Default", is_default=True)
+    other = create_watchlist("Tech")
+
+    with session_scope() as s:
+        asset = Asset(symbol="AAPL", name="Apple Inc.", asset_type=AssetType.STOCK)
+        s.add(asset)
+        s.flush()
+        asset_id = asset.id
+        # AAPL lives on the default watchlist already (seed-style).
+        from sidecar.db.models import WatchlistItem
+
+        s.add(WatchlistItem(watchlist_id=default.id, asset_id=asset_id, position=0))
+
+    # Stub yfinance + ingest — fast path must not touch either.
+    monkeypatch.setattr(
+        assets_service.yf,
+        "Ticker",
+        lambda _s: (_ for _ in ()).throw(
+            AssertionError("resolve_symbol should not run for an existing asset")
+        ),
+    )
+    import sidecar.scheduler.jobs as jobs_module
+
+    monkeypatch.setattr(
+        jobs_module,
+        "ingest_prices_for_symbols",
+        lambda symbols, **_kw: 0,
+    )
+
+    client = TestClient(app)
+    r = client.post(
+        "/api/assets/",
+        json={
+            "symbol": "AAPL",
+            "add_to_default_watchlist": False,
+            "watchlist_id": other.id,
+        },
+    )
+    assert r.status_code == 201
+    body = r.json()
+    assert body["newly_added"] is False
+    assert body["added_to_watchlist"] is True
+
+    # Verify AAPL is now on BOTH watchlists.
+    from sqlalchemy import select
+
+    from sidecar.db.models import WatchlistItem
+
+    with session_scope() as s:
+        rows = s.execute(
+            select(WatchlistItem.watchlist_id).where(
+                WatchlistItem.asset_id == asset_id
+            )
+        ).scalars().all()
+        assert set(rows) == {default.id, other.id}
+
+
+def test_create_asset_already_tracked_idempotent_on_same_watchlist(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Posting an already-tracked symbol for a watchlist it's already on
+    must still return 201 with ``added_to_watchlist=true`` — the end
+    state matches the caller's intent.
+    """
+    from sidecar.services.watchlists import create_watchlist
+
+    default = create_watchlist("Default", is_default=True)
+    with session_scope() as s:
+        asset = Asset(symbol="AAPL", name="Apple Inc.", asset_type=AssetType.STOCK)
+        s.add(asset)
+        s.flush()
+        from sidecar.db.models import WatchlistItem
+
+        s.add(WatchlistItem(watchlist_id=default.id, asset_id=asset.id, position=0))
+
+    monkeypatch.setattr(
+        assets_service.yf,
+        "Ticker",
+        lambda _s: (_ for _ in ()).throw(AssertionError),
+    )
+    import sidecar.scheduler.jobs as jobs_module
+
+    monkeypatch.setattr(
+        jobs_module, "ingest_prices_for_symbols", lambda symbols, **_kw: 0
+    )
+
+    client = TestClient(app)
+    r = client.post(
+        "/api/assets/",
+        json={"symbol": "AAPL", "add_to_default_watchlist": True},
+    )
+    assert r.status_code == 201
+    body = r.json()
+    assert body["newly_added"] is False
+    assert body["added_to_watchlist"] is True
+
+
+def test_create_asset_unknown_watchlist_id_is_non_fatal(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bogus ``watchlist_id`` must not fail the overall add — it logs
+    and sets ``added_to_watchlist=false``. Keeps the UI defensive: the
+    user's watchlist list might be stale mid-flow."""
     _patch_add_asset(
         monkeypatch,
         fast={"quote_type": "EQUITY"},
-        info={"longName": "Apple Inc."},
+        info={"longName": "Tesla"},
     )
+
     client = TestClient(app)
-    r = client.post("/api/assets/", json={"symbol": "aapl"})
-    assert r.status_code == 409
+    r = client.post(
+        "/api/assets/",
+        json={
+            "symbol": "TSLA",
+            "add_to_default_watchlist": False,
+            "watchlist_id": 99999,
+        },
+    )
+    assert r.status_code == 201
+    body = r.json()
+    assert body["newly_added"] is True
+    assert body["added_to_watchlist"] is False
 
 
 def test_create_asset_validation_422(isolated_db: Path) -> None:

@@ -24,16 +24,34 @@ import {
 
 interface AddAssetModalProps {
   onClose: () => void;
-  /** Called after a successful Add. The caller can refresh its asset list. */
-  onCreated: (asset: Asset, barsIngested: number, addedToWatchlist: boolean) => void;
+  /**
+   * Called after a successful Add. The caller can refresh its asset list.
+   * ``newlyAdded`` distinguishes a fresh yfinance resolution from an
+   * idempotent "this asset was already tracked" outcome — the caller can
+   * word its success banner accordingly.
+   */
+  onCreated: (
+    asset: Asset,
+    barsIngested: number,
+    addedToWatchlist: boolean,
+    newlyAdded: boolean,
+  ) => void;
   /** Whether to also add the new asset to the default watchlist. */
   addToDefaultWatchlist?: boolean;
+  /**
+   * When set, the backend also links the asset to this watchlist on create.
+   * Use this when the modal is launched from the "Track new…" button on a
+   * non-default watchlist — it makes the whole flow idempotent and avoids a
+   * follow-up ``addWatchlistItem`` call that would race the POST response.
+   */
+  watchlistId?: number | null;
 }
 
 export function AddAssetModal({
   onClose,
   onCreated,
   addToDefaultWatchlist = true,
+  watchlistId = null,
 }: AddAssetModalProps) {
   const [symbol, setSymbol] = useState("");
   const [preview, setPreview] = useState<AssetLookup | null>(null);
@@ -79,12 +97,21 @@ export function AddAssetModal({
     createAsset({
       symbol: preview.symbol,
       add_to_default_watchlist: addToDefaultWatchlist,
+      watchlist_id: watchlistId,
     })
       .then((res) => {
-        onCreated(res.asset, res.bars_ingested, res.added_to_watchlist);
+        onCreated(
+          res.asset,
+          res.bars_ingested,
+          res.added_to_watchlist,
+          res.newly_added,
+        );
         onClose();
       })
       .catch((err: unknown) => {
+        // 409 is no longer raised for already-tracked symbols (POST is
+        // idempotent), but keep a friendly fallback in case the backend
+        // ever reintroduces it for a different conflict.
         if (err instanceof ApiError && err.status === 409) {
           setError(`"${preview.symbol}" is already tracked.`);
         } else if (err instanceof Error) {

@@ -16,7 +16,6 @@ from sidecar.db.engine import session_scope
 from sidecar.db.models import Asset, AssetType
 from sidecar.services import assets as assets_service
 from sidecar.services.assets import (
-    AssetAlreadyExistsError,
     AssetServiceError,
     SymbolNotFoundError,
     add_asset,
@@ -269,6 +268,7 @@ def test_add_asset_persists_and_runs_ingest(
     assert result.name == "Palantir Technologies"
     assert result.asset_type is AssetType.STOCK
     assert result.bars_ingested == 42
+    assert result.newly_added is True
     # add_asset must request a 60-day/5-minute backfill, not the scheduler's
     # 1-day default — otherwise the chart only has today's bars and every
     # timeframe longer than ~1H reads "no data" right after the user clicks
@@ -285,20 +285,47 @@ def test_add_asset_persists_and_runs_ingest(
         assert row.name == "Palantir Technologies"
 
 
-def test_add_asset_duplicate_case_insensitive(
+def test_add_asset_idempotent_on_duplicate_case_insensitive(
     isolated_db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Adding an already-tracked symbol returns the existing row with
+    ``newly_added=False`` — no yfinance hit, no re-ingest. Lets the
+    "Track new…" on a non-default watchlist succeed when the asset is
+    already in another list.
+    """
     with session_scope() as s:
         s.add(Asset(symbol="AAPL", name="Apple Inc.", asset_type=AssetType.STOCK))
 
-    _patch_ticker(
-        monkeypatch,
-        fast={"quote_type": "EQUITY"},
-        info={"longName": "Apple Inc."},
-    )
+    # yfinance + ingest shims that WOULD run on a slow-path add. We assert
+    # neither was invoked — the fast path short-circuits before them.
+    resolve_calls = {"n": 0}
 
-    with pytest.raises(AssetAlreadyExistsError):
-        add_asset("aapl")
+    def _unexpected_ticker(_sym: str) -> object:
+        resolve_calls["n"] += 1
+        raise AssertionError("resolve_symbol should not run on idempotent add")
+
+    monkeypatch.setattr("sidecar.services.assets.yf.Ticker", _unexpected_ticker)
+
+    ingest_calls: list[list[str]] = []
+
+    def _spy_ingest(
+        symbols: list[str], *, period: str = "1d", interval: str = "5m"
+    ) -> int:
+        ingest_calls.append(list(symbols))
+        return 0
+
+    import sidecar.scheduler.jobs as jobs_module
+
+    monkeypatch.setattr(jobs_module, "ingest_prices_for_symbols", _spy_ingest)
+
+    result = add_asset("aapl")
+    assert result.symbol == "AAPL"
+    assert result.newly_added is False
+    assert result.bars_ingested == 0
+    # The whole point of the short-circuit: no fresh yfinance lookup,
+    # no 60-day re-ingest.
+    assert resolve_calls["n"] == 0
+    assert ingest_calls == []
 
 
 def test_add_asset_ingest_failure_is_non_fatal(
