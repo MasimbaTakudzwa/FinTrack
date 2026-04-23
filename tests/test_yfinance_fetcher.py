@@ -34,6 +34,26 @@ def _multi_symbol_frame() -> pd.DataFrame:
     return pd.DataFrame(data, index=idx, columns=cols)
 
 
+def _single_symbol_multiindex_frame() -> pd.DataFrame:
+    """Shape yfinance >= 0.2.66 returns for a single-symbol download with
+    ``group_by="ticker"`` — MultiIndex columns of ``(SYMBOL, field)`` even
+    when only one ticker was requested. Older yfinance used the flat
+    shape in :func:`_single_symbol_frame`; we keep tests for both so the
+    fetcher survives a downgrade or future yfinance revert.
+    """
+    idx = pd.to_datetime(
+        ["2026-04-22 13:00:00", "2026-04-22 13:05:00"], utc=True
+    )
+    cols = pd.MultiIndex.from_product(
+        [["AAPL"], ["Open", "High", "Low", "Close", "Volume"]]
+    )
+    data = [
+        [100.0, 101.5, 99.5, 101.0, 1_000_000],
+        [101.0, 102.0, 100.5, 101.75, 1_200_000],
+    ]
+    return pd.DataFrame(data, index=idx, columns=cols)
+
+
 def test_fetch_prices_single_symbol(monkeypatch) -> None:
     monkeypatch.setattr(
         yfinance_fetcher, "_download", lambda symbols, period, interval: _single_symbol_frame()
@@ -44,6 +64,27 @@ def test_fetch_prices_single_symbol(monkeypatch) -> None:
     assert bars[0].open == Decimal("100.0")
     assert bars[0].volume == 1_000_000
     assert bars[0].timestamp.tzinfo is not None
+
+
+def test_fetch_prices_single_symbol_multiindex(monkeypatch) -> None:
+    """yfinance 0.2.66+ returns MultiIndex columns for the single-symbol
+    shape too — regression guard for the bug where we treated it as flat
+    and every ``row.get("Open")`` returned None, silently dropping all
+    bars on any one-at-a-time fetch (the path the 'Add asset' feature
+    uses).
+    """
+    monkeypatch.setattr(
+        yfinance_fetcher,
+        "_download",
+        lambda symbols, period, interval: _single_symbol_multiindex_frame(),
+    )
+    bars = fetch_prices(["AAPL"])
+    assert len(bars) == 2
+    assert bars[0].symbol == "AAPL"
+    assert bars[0].open == Decimal("100.0")
+    assert bars[0].close == Decimal("101.0")
+    assert bars[0].volume == 1_000_000
+    assert bars[1].close == Decimal("101.75")
 
 
 def test_fetch_prices_multi_symbol(monkeypatch) -> None:

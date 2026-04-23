@@ -189,7 +189,7 @@ def _patch_add_asset(
     import sidecar.scheduler.jobs as jobs_module
 
     monkeypatch.setattr(
-        jobs_module, "ingest_prices_for_symbols", lambda symbols: bars
+        jobs_module, "ingest_prices_for_symbols", lambda symbols, **_kw: bars
     )
 
 
@@ -341,7 +341,9 @@ def test_create_asset_ingest_failure_returns_zero_bars(
 
     import sidecar.scheduler.jobs as jobs_module
 
-    def _boom(symbols: list[str]) -> int:
+    def _boom(
+        symbols: list[str], *, period: str = "1d", interval: str = "5m"
+    ) -> int:
         raise RuntimeError("net fail")
 
     monkeypatch.setattr(jobs_module, "ingest_prices_for_symbols", _boom)

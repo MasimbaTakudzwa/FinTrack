@@ -192,13 +192,20 @@ def add_asset(raw: str) -> AddAssetResult:
         new_id = asset.id
 
     # Kick off a one-shot ingest outside the transaction so the user sees
-    # bars without waiting for the 5-min scheduler tick. Failures here aren't
-    # fatal — the next scheduler run will pick this symbol up anyway.
+    # bars without waiting for the 5-min scheduler tick. We request a 60-day
+    # backfill at 5-min resolution (yfinance's max window at that granularity)
+    # so the chart is immediately usable on all timeframes, not just "1H".
+    # Failures here aren't fatal — the next scheduler run will pick this
+    # symbol up anyway.
     bars_ingested = 0
     try:
         from sidecar.scheduler.jobs import ingest_prices_for_symbols
 
-        bars_ingested = ingest_prices_for_symbols([resolved.symbol])
+        bars_ingested = ingest_prices_for_symbols(
+            [resolved.symbol],
+            period="60d",
+            interval="5m",
+        )
     except Exception:
         logger.exception("one-shot ingest failed for %s", resolved.symbol)
 
