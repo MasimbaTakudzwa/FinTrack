@@ -23,11 +23,21 @@ function fmtPct(pct: number): string {
 
 export function AssetCard({ asset, series, loading, error }: Props) {
   const closes = series?.points.map((p) => Number(p.close)) ?? [];
+  const highs = series?.points.map((p) => Number(p.high)) ?? [];
+  const lows = series?.points.map((p) => Number(p.low)) ?? [];
   const last = closes.at(-1) ?? null;
   const prev = closes.length >= 2 ? closes.at(-2) ?? null : null;
   const changePct = last !== null && prev !== null && prev !== 0
     ? ((last - prev) / prev) * 100
     : null;
+
+  // Session range from the sparkline window (high/low across visible bars).
+  // Filter out NaN-ish values (yfinance occasionally emits NaN for low-volume
+  // bars, which becomes `NaN` after `Number()`).
+  const cleanHighs = highs.filter((n) => Number.isFinite(n));
+  const cleanLows = lows.filter((n) => Number.isFinite(n));
+  const rangeHigh = cleanHighs.length > 0 ? Math.max(...cleanHighs) : null;
+  const rangeLow = cleanLows.length > 0 ? Math.min(...cleanLows) : null;
 
   const direction: "up" | "down" | "flat" =
     changePct === null ? "flat" : changePct > 0 ? "up" : changePct < 0 ? "down" : "flat";
@@ -66,15 +76,26 @@ export function AssetCard({ asset, series, loading, error }: Props) {
       </div>
 
       <div className="flex items-end justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <div className="text-xl font-semibold tracking-tight text-zinc-900 tabular-nums dark:text-zinc-100">
             {last === null ? "—" : fmtPrice(last)}
           </div>
-          <div className="mt-0.5 text-[10px] uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
-            {loading && !series ? "Loading…" : error ? "Error" : series ? `${series.count} bars` : "No data"}
-          </div>
+          {rangeLow !== null && rangeHigh !== null ? (
+            <div className="mt-0.5 font-mono text-[10px] tabular-nums text-zinc-500 dark:text-zinc-400">
+              L {fmtPrice(rangeLow)} · H {fmtPrice(rangeHigh)}
+            </div>
+          ) : (
+            <div className="mt-0.5 text-[10px] uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
+              {loading && !series ? "Loading…" : error ? "Error" : "No data"}
+            </div>
+          )}
         </div>
-        <Sparkline values={closes} width={110} height={36} />
+        <Sparkline
+          values={closes}
+          width={110}
+          height={36}
+          referenceValue={prev}
+        />
       </div>
     </Link>
   );

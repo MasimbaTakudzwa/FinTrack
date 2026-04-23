@@ -102,6 +102,7 @@ def test_upgrade_to_head_creates_article_tables(tmp_path: Path) -> None:
             "source",
             "published_at",
             "summary",
+            "image_url",
             "created_at",
         } <= art_cols
 

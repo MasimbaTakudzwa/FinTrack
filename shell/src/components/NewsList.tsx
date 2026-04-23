@@ -1,4 +1,5 @@
 import { ExternalLink, Newspaper } from "lucide-react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import type { Article } from "../api/client";
 
@@ -81,10 +82,19 @@ function NewsRow({
   const visibleSymbols = hideSymbol
     ? article.symbols.filter((s) => s.toUpperCase() !== hideSymbol.toUpperCase())
     : article.symbols;
+  // For the thumbnail fallback we prefer the symbol this article was shown
+  // against (hideSymbol) — it keeps colours stable for the whole AssetDetail
+  // list. Fall back to the first linked symbol if we don't have one.
+  const fallbackSymbol = hideSymbol ?? article.symbols[0] ?? "?";
 
   return (
     <li className={compact ? "py-2" : "py-3"}>
-      <div className="flex items-start justify-between gap-2">
+      <div className="flex items-start gap-3">
+        <NewsThumbnail
+          imageUrl={article.image_url}
+          fallbackSymbol={fallbackSymbol}
+          compact={compact}
+        />
         <div className="min-w-0 flex-1">
           <a
             href={article.url}
@@ -127,6 +137,54 @@ function NewsRow({
       </div>
     </li>
   );
+}
+
+function NewsThumbnail({
+  imageUrl,
+  fallbackSymbol,
+  compact,
+}: {
+  imageUrl: string | null;
+  fallbackSymbol: string;
+  compact: boolean;
+}) {
+  const [broken, setBroken] = useState(false);
+  const sizeClass = compact ? "h-12 w-12" : "h-16 w-16";
+
+  if (imageUrl && !broken) {
+    return (
+      <img
+        src={imageUrl}
+        alt=""
+        loading="lazy"
+        onError={() => setBroken(true)}
+        className={`${sizeClass} shrink-0 rounded object-cover ring-1 ring-zinc-200 dark:ring-zinc-800`}
+      />
+    );
+  }
+  // Ticker-coloured fallback — stable per symbol (no randomness) so the same
+  // asset always renders in the same hue. Good enough visual variety without
+  // needing external icon packs.
+  const hue = hashHue(fallbackSymbol);
+  const letter = (fallbackSymbol[0] ?? "?").toUpperCase();
+  return (
+    <div
+      className={`${sizeClass} shrink-0 rounded flex items-center justify-center font-semibold text-white ring-1 ring-zinc-200 dark:ring-zinc-800`}
+      style={{ backgroundColor: `hsl(${hue} 55% 45%)` }}
+      aria-hidden="true"
+    >
+      {letter}
+    </div>
+  );
+}
+
+function hashHue(str: string): number {
+  // Small deterministic hash — good enough to spread hues across the wheel.
+  let h = 0;
+  for (let i = 0; i < str.length; i++) {
+    h = (h * 31 + str.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h) % 360;
 }
 
 function formatRelative(iso: string): string {

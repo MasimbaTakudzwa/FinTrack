@@ -43,6 +43,7 @@ class SeedMacroIndicator:
 
 
 DEFAULT_MACRO_INDICATORS: tuple[SeedMacroIndicator, ...] = (
+    # --- Original five (v0.1.0) ---
     SeedMacroIndicator(
         "CPIAUCSL",
         "Consumer Price Index (CPI-U)",
@@ -77,6 +78,81 @@ DEFAULT_MACRO_INDICATORS: tuple[SeedMacroIndicator, ...] = (
         "Quarterly GDP, seasonally adjusted annual rate",
         "Billions of Dollars",
         "quarterly",
+    ),
+    # --- Labour + inflation (expansion) ---
+    SeedMacroIndicator(
+        "PAYEMS",
+        "Total Nonfarm Payrolls",
+        "All Employees, Total Nonfarm, seasonally adjusted",
+        "Thousands of Persons",
+        "monthly",
+    ),
+    SeedMacroIndicator(
+        "PCEPILFE",
+        "Core PCE Price Index",
+        "Personal Consumption Expenditures excluding food and energy, the Fed's preferred inflation gauge",
+        "Index 2017=100",
+        "monthly",
+    ),
+    # --- Money supply + output ---
+    SeedMacroIndicator(
+        "M2SL",
+        "M2 Money Stock",
+        "M2 money supply, seasonally adjusted",
+        "Billions of Dollars",
+        "monthly",
+    ),
+    SeedMacroIndicator(
+        "INDPRO",
+        "Industrial Production Index",
+        "Industrial production, seasonally adjusted",
+        "Index 2017=100",
+        "monthly",
+    ),
+    # --- Housing ---
+    SeedMacroIndicator(
+        "HOUST",
+        "Housing Starts",
+        "New privately-owned housing units started, seasonally adjusted annual rate",
+        "Thousands of Units",
+        "monthly",
+    ),
+    SeedMacroIndicator(
+        "MORTGAGE30US",
+        "30-Year Fixed Rate Mortgage Average",
+        "Freddie Mac primary mortgage market survey, 30-year fixed rate",
+        "%",
+        "weekly",
+    ),
+    # --- Market stress + curve ---
+    SeedMacroIndicator(
+        "VIXCLS",
+        "CBOE Volatility Index: VIX",
+        "Implied volatility of S&P 500 index options; market 'fear gauge'",
+        "Index",
+        "daily",
+    ),
+    SeedMacroIndicator(
+        "T10Y2Y",
+        "10-Year Minus 2-Year Treasury Spread",
+        "10-Year Treasury Constant Maturity minus 2-Year Treasury Constant Maturity; recession indicator when negative",
+        "%",
+        "daily",
+    ),
+    # --- Consumer + commodities ---
+    SeedMacroIndicator(
+        "UMCSENT",
+        "University of Michigan Consumer Sentiment",
+        "Index of Consumer Sentiment from the Survey of Consumers",
+        "Index 1966:Q1=100",
+        "monthly",
+    ),
+    SeedMacroIndicator(
+        "DCOILWTICO",
+        "WTI Crude Oil Spot Price",
+        "West Texas Intermediate crude oil, spot price FOB",
+        "Dollars per Barrel",
+        "daily",
     ),
 )
 

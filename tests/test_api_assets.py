@@ -350,3 +350,164 @@ def test_create_asset_ingest_failure_returns_zero_bars(
     r = client.post("/api/assets/", json={"symbol": "THING"})
     assert r.status_code == 201
     assert r.json()["bars_ingested"] == 0
+
+
+# ---------------------------------------------------------------------------
+# GET /api/assets/{symbol}/quote/
+# ---------------------------------------------------------------------------
+
+
+def _patch_quote_yfinance(
+    monkeypatch: pytest.MonkeyPatch, fast: dict[str, Any]
+) -> None:
+    """Install a fake yfinance Ticker yielding ``fast`` from fast_info."""
+
+    class _FI:
+        def __init__(self, d: dict[str, Any]) -> None:
+            self._d = d
+
+        def __getattr__(self, name: str) -> Any:
+            if name in self._d:
+                return self._d[name]
+            raise AttributeError(name)
+
+        def get(self, name: str, default: Any = None) -> Any:
+            return self._d.get(name, default)
+
+    class _T:
+        def __init__(self, sym: str) -> None:
+            self.ticker = sym
+
+        @property
+        def fast_info(self) -> _FI:
+            return _FI(fast)
+
+    monkeypatch.setattr(assets_service.yf, "Ticker", _T)
+
+
+def test_get_quote_returns_tracked_asset_metadata(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from decimal import Decimal
+
+    from sidecar.db.models import PricePoint
+
+    with session_scope() as s:
+        asset = Asset(symbol="AAPL", name="Apple Inc.", asset_type=AssetType.STOCK)
+        s.add(asset)
+        s.flush()
+        s.add(
+            PricePoint(
+                asset_id=asset.id,
+                timestamp=__import__("datetime").datetime(
+                    2026, 4, 22, 20, 0, tzinfo=__import__("datetime").UTC
+                ),
+                open=Decimal("180.00"),
+                high=Decimal("185.00"),
+                low=Decimal("179.00"),
+                close=Decimal("184.25"),
+                volume=1_000_000,
+            )
+        )
+
+    _patch_quote_yfinance(
+        monkeypatch,
+        fast={
+            "currency": "USD",
+            "exchange": "NMS",
+            "market_cap": 3_000_000_000_000,
+            "year_high": 220.0,
+            "year_low": 150.0,
+            "fifty_day_average": 190.5,
+            "two_hundred_day_average": 175.25,
+        },
+    )
+    # Cached quotes from a previous test run would leak across tests.
+    assets_service.clear_quote_cache()
+
+    client = TestClient(app)
+    r = client.get("/api/assets/AAPL/quote/")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["symbol"] == "AAPL"
+    assert body["exchange"] == "NMS"
+    assert body["currency"] == "USD"
+    assert body["market_cap"] == 3_000_000_000_000
+    # Pydantic v2 preserves the Decimal's input precision when serialising to
+    # string — SQLAlchemy hands back exactly what was stored, no Numeric(18,6)
+    # padding. Seeded as Decimal("184.25") → emitted as "184.25".
+    assert Decimal(body["last_price"]) == Decimal("184.25")
+    assert Decimal(body["year_high"]) == Decimal("220")
+    assert Decimal(body["year_low"]) == Decimal("150")
+    assert Decimal(body["fifty_day_average"]) == Decimal("190.5")
+    assert Decimal(body["two_hundred_day_average"]) == Decimal("175.25")
+
+
+def test_get_quote_unknown_symbol_404(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assets_service.clear_quote_cache()
+    _patch_quote_yfinance(monkeypatch, fast={})
+    client = TestClient(app)
+    r = client.get("/api/assets/NEVER/quote/")
+    assert r.status_code == 404
+
+
+def test_get_quote_uses_cache(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Second call within the TTL must not touch yfinance again."""
+    with session_scope() as s:
+        s.add(Asset(symbol="AAPL", name="Apple Inc.", asset_type=AssetType.STOCK))
+
+    calls = {"n": 0}
+
+    class _FI:
+        @property
+        def currency(self) -> str:
+            return "USD"
+
+        def get(self, name: str, default: Any = None) -> Any:
+            return None
+
+    class _T:
+        def __init__(self, sym: str) -> None:
+            calls["n"] += 1
+            self.ticker = sym
+
+        @property
+        def fast_info(self) -> _FI:
+            return _FI()
+
+    monkeypatch.setattr(assets_service.yf, "Ticker", _T)
+    assets_service.clear_quote_cache()
+
+    client = TestClient(app)
+    r1 = client.get("/api/assets/AAPL/quote/")
+    r2 = client.get("/api/assets/AAPL/quote/")
+    assert r1.status_code == r2.status_code == 200
+    assert calls["n"] == 1, "second call should be served from cache"
+
+
+def test_get_quote_handles_missing_fast_info(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """yfinance often returns an empty fast_info for new listings — the
+    endpoint should still succeed, exposing only whatever we DO have
+    (symbol + whatever came from our DB)."""
+    with session_scope() as s:
+        s.add(Asset(symbol="NEW", name="Newco", asset_type=AssetType.STOCK))
+
+    assets_service.clear_quote_cache()
+    _patch_quote_yfinance(monkeypatch, fast={})
+
+    client = TestClient(app)
+    r = client.get("/api/assets/new/quote/")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["symbol"] == "NEW"
+    assert body["currency"] is None
+    assert body["exchange"] is None
+    assert body["last_price"] is None
+    assert body["market_cap"] is None
+    assert body["year_high"] is None

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,6 +30,7 @@ from sidecar.services.assets import (
     AssetServiceError,
     SymbolNotFoundError,
     add_asset,
+    get_quote,
     resolve_symbol,
 )
 from sidecar.services.watchlists import (
@@ -80,6 +82,25 @@ class CreateAssetOut(BaseModel):
     asset: AssetOut
     bars_ingested: int
     added_to_watchlist: bool
+
+
+class AssetQuoteOut(BaseModel):
+    """Fast-info-backed technicals + metadata for a tracked symbol.
+
+    Decimals are serialised as strings to match the rest of the price API
+    (Pydantic's default behaviour for Decimal fields) — the shell parses them
+    with ``Number(...)`` at render time.
+    """
+
+    symbol: str
+    exchange: str | None
+    currency: str | None
+    last_price: Decimal | None
+    market_cap: int | None
+    year_high: Decimal | None
+    year_low: Decimal | None
+    fifty_day_average: Decimal | None
+    two_hundred_day_average: Decimal | None
 
 
 # ---------------------------------------------------------------------------
@@ -165,4 +186,30 @@ def create_asset_route(body: CreateAssetIn) -> CreateAssetOut:
         asset=asset_out,
         bars_ingested=result.bars_ingested,
         added_to_watchlist=added_to_watchlist,
+    )
+
+
+@router.get("/{symbol}/quote/", response_model=AssetQuoteOut)
+def get_asset_quote(symbol: str) -> AssetQuoteOut:
+    """Metadata + technicals for a tracked symbol (AssetDetail strip).
+
+    Cached 60 s in-process. Returns 404 if the symbol isn't tracked — this
+    endpoint does not resolve arbitrary symbols, use ``/lookup/`` for that.
+    """
+    try:
+        quote = get_quote(symbol)
+    except SymbolNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AssetServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return AssetQuoteOut(
+        symbol=quote.symbol,
+        exchange=quote.exchange,
+        currency=quote.currency,
+        last_price=quote.last_price,
+        market_cap=quote.market_cap,
+        year_high=quote.year_high,
+        year_low=quote.year_low,
+        fifty_day_average=quote.fifty_day_average,
+        two_hundred_day_average=quote.two_hundred_day_average,
     )

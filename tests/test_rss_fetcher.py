@@ -77,6 +77,56 @@ def test_fetch_news_for_symbol_parses_entries(
     assert items[0].source == "Yahoo Finance"
     assert items[0].published_at == datetime(2026, 4, 22, 12, 30, tzinfo=UTC)
     assert items[0].summary == "Apple posted strong Q2 results."
+    # No <media:*> in the sample → image_url should be None.
+    assert items[0].image_url is None
+
+
+def test_fetch_news_captures_thumbnail_from_media_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Yahoo RSS entries frequently carry a ``<media:content>`` (Media RSS)
+    element with a preview image. feedparser normalises it onto
+    ``entry.media_content`` and we pluck the first URL out of that list.
+    """
+    sample = (
+        b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>Yahoo Finance - AAPL</title>
+    <item>
+      <title>Apple with picture</title>
+      <link>https://example.com/pic</link>
+      <pubDate>Wed, 22 Apr 2026 12:30:00 GMT</pubDate>
+      <description>A story with a thumbnail.</description>
+      <media:content url="https://example.com/thumb.jpg" medium="image" />
+    </item>
+    <item>
+      <title>Apple with explicit thumbnail</title>
+      <link>https://example.com/thumb-tag</link>
+      <pubDate>Wed, 22 Apr 2026 13:30:00 GMT</pubDate>
+      <description>A story with media:thumbnail.</description>
+      <media:thumbnail url="https://example.com/preview.png" />
+    </item>
+    <item>
+      <title>Apple with no picture</title>
+      <link>https://example.com/no-pic</link>
+      <pubDate>Wed, 22 Apr 2026 14:30:00 GMT</pubDate>
+      <description>A plain story.</description>
+    </item>
+  </channel>
+</rss>"""
+    )
+    monkeypatch.setattr(rss_fetcher, "_http_get", lambda url, *, timeout: sample)
+
+    items = fetch_news_for_symbol("AAPL")
+    assert len(items) == 3
+    by_url = {i.url: i for i in items}
+    assert by_url["https://example.com/pic"].image_url == "https://example.com/thumb.jpg"
+    assert (
+        by_url["https://example.com/thumb-tag"].image_url
+        == "https://example.com/preview.png"
+    )
+    assert by_url["https://example.com/no-pic"].image_url is None
 
 
 def test_fetch_news_for_symbol_skips_entries_missing_critical_fields(
