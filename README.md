@@ -27,7 +27,13 @@ Download the latest installer from the [releases page](https://github.com/Masimb
 ### macOS
 
 1. Open the `.dmg` and drag `FinTrack.app` to `/Applications`.
-2. First launch: right-click the app → **Open** (required because current builds are unsigned; this only needs to be done once per version).
+2. **First-launch workaround** — current builds aren't signed with an Apple Developer ID, and macOS flags anything you downloaded through a browser with a "quarantine" attribute. Before opening the app, run this in Terminal:
+   ```bash
+   xattr -cr /Applications/FinTrack.app
+   ```
+   This strips the quarantine flag and only needs to be done once per install. Without this step, macOS (especially on Apple Silicon) shows *"FinTrack is damaged and can't be opened"* — which is misleading; the app is fine, Gatekeeper just refuses to run unsigned quarantined binaries.
+
+   (On older macOS versions or Intel Macs you may instead see *"unidentified developer"* — for that, right-click the app → **Open** → **Open Anyway**. Either dialog is telling you the same underlying thing.)
 3. The app's SQLite database is stored at `~/Library/Application Support/FinTrack/fintrack.db`.
 
 ### Windows
