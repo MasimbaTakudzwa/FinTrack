@@ -7,8 +7,11 @@
  * next step (preview, add, etc.).
  *
  * Design notes:
- * - 300ms debounce on typing so we don't hammer `/api/assets/search/` on
- *   every keystroke.
+ * - 500ms debounce on typing so we don't hammer `/api/assets/search/` on
+ *   every keystroke. Longer than the usual ~300ms because Yahoo Finance's
+ *   search endpoint is aggressively rate-limited and shares a budget with
+ *   our scheduled ingestion; combined with the backend's 5-min TTL cache,
+ *   this keeps an average session comfortably under the 429 threshold.
  * - AbortController on each in-flight request, cancelled when the user types
  *   again (stale responses never overwrite fresh ones).
  * - Arrow-key navigation: ArrowDown/ArrowUp moves the active row, Enter
@@ -133,7 +136,7 @@ export function AssetSearchCombo({
     setLoading(true);
     timerRef.current = window.setTimeout(() => {
       runSearch(trimmed);
-    }, 300);
+    }, 500);
   };
 
   const onInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {

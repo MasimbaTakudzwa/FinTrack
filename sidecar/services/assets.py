@@ -13,6 +13,8 @@ scheduler tick.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -318,6 +320,68 @@ _SEARCH_HEADERS = {
     "Accept": "application/json,text/plain,*/*",
 }
 
+# ---------------------------------------------------------------------------
+# Search cache
+# ---------------------------------------------------------------------------
+#
+# Yahoo's autocomplete endpoint 429s aggressively when our IP's request rate
+# spikes — and it shares a budget with the sidecar's scheduled price+news
+# ingestion. A tiny in-memory cache smooths this over for common user
+# patterns: typing a query, deleting it, retyping the same thing. The
+# second+ attempts served from cache cost Yahoo nothing.
+#
+# Intentionally small + simple: dict keyed on (lowercased_query, limit),
+# value is (stored_at_monotonic, hits). Plain threading.Lock — the jobstore
+# thread and FastAPI worker threads both use this service, but contention
+# is negligible (search is only called from API handlers, not scheduled
+# jobs). Max size bounded to avoid unbounded growth from random probes.
+#
+# No stale-while-revalidate, no background refresh — the TTL keeps data
+# fresh enough for a finance-search use case (a new Yahoo listing won't
+# appear for up to 5 min, which is fine). Errors deliberately aren't
+# cached — a 429 should be retryable on the next call.
+_SEARCH_CACHE_TTL_SECONDS = 300.0
+_SEARCH_CACHE_MAX_SIZE = 128
+
+_search_cache: dict[tuple[str, int], tuple[float, list[SymbolSearchHit]]] = {}
+_search_cache_lock = threading.Lock()
+
+
+def _cache_get(key: tuple[str, int]) -> list[SymbolSearchHit] | None:
+    """Return cached hits if present and still within TTL, else ``None``.
+
+    Expired entries are evicted on read so the cache self-heals without a
+    background sweeper.
+    """
+    with _search_cache_lock:
+        entry = _search_cache.get(key)
+        if entry is None:
+            return None
+        stored_at, hits = entry
+        if time.monotonic() - stored_at > _SEARCH_CACHE_TTL_SECONDS:
+            _search_cache.pop(key, None)
+            return None
+        return hits
+
+
+def _cache_put(key: tuple[str, int], hits: list[SymbolSearchHit]) -> None:
+    """Store hits under ``key``. Evicts the oldest entry if at capacity."""
+    with _search_cache_lock:
+        if (
+            len(_search_cache) >= _SEARCH_CACHE_MAX_SIZE
+            and key not in _search_cache
+        ):
+            # Capacity reached — evict the entry with the oldest timestamp.
+            oldest = min(_search_cache, key=lambda k: _search_cache[k][0])
+            _search_cache.pop(oldest, None)
+        _search_cache[key] = (time.monotonic(), hits)
+
+
+def _reset_search_cache() -> None:
+    """Clear the cache. Intended for tests; not part of the public API."""
+    with _search_cache_lock:
+        _search_cache.clear()
+
 
 def search_symbols(query: str, limit: int = 10) -> list[SymbolSearchHit]:
     """Search Yahoo Finance for symbols matching a free-text query.
@@ -349,6 +413,15 @@ def search_symbols(query: str, limit: int = 10) -> list[SymbolSearchHit]:
         raise AssetServiceError(
             f"limit out of range (1..{_SEARCH_MAX_LIMIT})"
         )
+
+    # Cache lookup. Key on lowercased query so "APPLE" / "apple" / "Apple"
+    # hit the same slot. ``limit`` is part of the key because different
+    # limits yield different result lengths — we don't try to satisfy a
+    # limit=10 request from a limit=5 cache entry.
+    cache_key = (q.lower(), limit)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     # ``params`` is annotated str→str|int (not Any) to satisfy requests' stubs.
     params: dict[str, str | int] = {
@@ -420,4 +493,8 @@ def search_symbols(query: str, limit: int = 10) -> list[SymbolSearchHit]:
         seen.add(sym_up)
         if len(hits) >= limit:
             break
+    # Cache the successful response (including empty-result lookups — "no
+    # matches for foo" is worth remembering). Errors raised above bypass
+    # this store, so a 429 or network blip stays retryable.
+    _cache_put(cache_key, hits)
     return hits

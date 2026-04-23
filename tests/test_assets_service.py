@@ -22,6 +22,20 @@ from sidecar.services.assets import (
     resolve_symbol,
 )
 
+
+@pytest.fixture(autouse=True)
+def _reset_search_cache() -> None:
+    """Clear the process-wide search cache before every test.
+
+    The search cache is module state in ``sidecar.services.assets`` — without
+    this, tests that call ``search_symbols`` with the same query in sequence
+    would serve the first test's monkeypatched payload to every subsequent
+    test. Fixture is autouse so all tests (even non-search ones) see a clean
+    slate without having to opt in.
+    """
+    assets_service._reset_search_cache()
+
+
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
@@ -606,3 +620,159 @@ def test_search_symbols_forwards_query_params(
     assert params["q"] == "BTC-USD"
     assert params["quotesCount"] == 7
     assert params["newsCount"] == 0
+
+
+# ---------------------------------------------------------------------------
+# search_symbols — TTL cache
+# ---------------------------------------------------------------------------
+
+
+def test_search_symbols_caches_successful_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second identical call within TTL must be served from the cache."""
+    calls: list[dict[str, Any]] = []
+    payload = {
+        "quotes": [
+            {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY"},
+        ]
+    }
+    _patch_search(
+        monkeypatch,
+        response=_FakeResponse(json_payload=payload),
+        calls=calls,
+    )
+
+    first = assets_service.search_symbols("apple")
+    second = assets_service.search_symbols("apple")
+
+    assert len(calls) == 1  # upstream hit only once
+    assert [h.symbol for h in first] == ["AAPL"]
+    assert [h.symbol for h in second] == ["AAPL"]
+
+
+def test_search_symbols_cache_is_case_insensitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'APPLE' / 'apple' / 'Apple' must all hit the same cache slot."""
+    calls: list[dict[str, Any]] = []
+    payload = {
+        "quotes": [
+            {"symbol": "AAPL", "shortname": "Apple Inc.", "quoteType": "EQUITY"},
+        ]
+    }
+    _patch_search(
+        monkeypatch,
+        response=_FakeResponse(json_payload=payload),
+        calls=calls,
+    )
+
+    assets_service.search_symbols("APPLE")
+    assets_service.search_symbols("apple")
+    assets_service.search_symbols("Apple")
+
+    assert len(calls) == 1
+
+
+def test_search_symbols_cache_separates_by_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Different limits must not share a cache entry — a limit=5 result
+    cannot satisfy a limit=10 request."""
+    calls: list[dict[str, Any]] = []
+    payload = {
+        "quotes": [
+            {"symbol": f"SYM{i}", "shortname": f"Thing {i}", "quoteType": "EQUITY"}
+            for i in range(15)
+        ]
+    }
+    _patch_search(
+        monkeypatch,
+        response=_FakeResponse(json_payload=payload),
+        calls=calls,
+    )
+
+    assets_service.search_symbols("s", limit=5)
+    assets_service.search_symbols("s", limit=10)
+    # Same query, different limits — cache keys differ, so upstream twice.
+    assert len(calls) == 2
+
+    # Repeating limit=5 hits the cache again.
+    assets_service.search_symbols("s", limit=5)
+    assert len(calls) == 2
+
+
+def test_search_symbols_cache_expires_after_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Entries older than TTL must be evicted and re-fetched."""
+    calls: list[dict[str, Any]] = []
+    _patch_search(
+        monkeypatch,
+        response=_FakeResponse(
+            json_payload={
+                "quotes": [
+                    {"symbol": "AAPL", "shortname": "Apple", "quoteType": "EQUITY"},
+                ]
+            }
+        ),
+        calls=calls,
+    )
+
+    # Fake clock we control. The cache reads ``time.monotonic`` from the
+    # ``time`` module imported inside ``sidecar.services.assets``.
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 1000.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+    clock = _Clock()
+    monkeypatch.setattr(assets_service.time, "monotonic", clock.monotonic)
+
+    assets_service.search_symbols("apple")
+    assert len(calls) == 1
+
+    # Well within TTL — served from cache.
+    clock.now += 60.0
+    assets_service.search_symbols("apple")
+    assert len(calls) == 1
+
+    # Past TTL — entry evicted on read, upstream refetched.
+    clock.now += assets_service._SEARCH_CACHE_TTL_SECONDS + 1.0
+    assets_service.search_symbols("apple")
+    assert len(calls) == 2
+
+
+def test_search_symbols_does_not_cache_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed call must NOT poison the cache — the next call retries
+    and can return a successful payload."""
+    from sidecar.services.assets import SymbolSearchError
+
+    responses: list[_FakeResponse] = [
+        _FakeResponse(status_code=503),
+        _FakeResponse(
+            json_payload={
+                "quotes": [
+                    {"symbol": "AAPL", "shortname": "Apple", "quoteType": "EQUITY"},
+                ]
+            }
+        ),
+    ]
+
+    def _get(url: str, **kwargs: Any) -> _FakeResponse:
+        return responses.pop(0)
+
+    monkeypatch.setattr(assets_service.requests, "get", _get)
+
+    with pytest.raises(SymbolSearchError):
+        assets_service.search_symbols("apple")
+
+    hits = assets_service.search_symbols("apple")
+    assert [h.symbol for h in hits] == ["AAPL"]
+    # Both fakes were consumed — the second call actually hit the upstream,
+    # which is the entire point of this test.
+    assert responses == []
