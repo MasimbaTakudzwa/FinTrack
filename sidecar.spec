@@ -56,10 +56,27 @@ datas: list[tuple[str, str]] = [
 ]
 
 # Third-party packages that ship data alongside their Python code.
-# yfinance ships a pickled constants file; feedparser ships an encoding map;
-# apscheduler has a plugin registry (setuptools entry_points) that needs to
-# be preserved.
-for pkg in ("yfinance", "feedparser", "apscheduler"):
+# - yfinance ships a pickled constants file.
+# - feedparser ships an encoding map.
+# - apscheduler has a plugin registry (setuptools entry_points) that needs to
+#   be preserved.
+# - statsmodels ships reference tables (distribution critical values, seasonal
+#   templates) under ``statsmodels/datasets/`` and ``statsmodels/stats/libqsturng``.
+# - scipy ships .pyi stubs and compiled LAPACK routines that its submodules
+#   reference by relative path at import time.
+# - numpy's F2PY runtime shims live alongside its code.
+# - pandas ships a timezone database clone + SQL dialect hooks.
+# - patsy (statsmodels' formula engine) keeps builtin transforms under data.
+for pkg in (
+    "yfinance",
+    "feedparser",
+    "apscheduler",
+    "statsmodels",
+    "scipy",
+    "numpy",
+    "pandas",
+    "patsy",
+):
     try:
         datas.extend(collect_data_files(pkg))
     except Exception:  # noqa: BLE001 - third-party pkg optional at collect time
@@ -91,14 +108,30 @@ hiddenimports += collect_submodules("fastapi")
 hiddenimports += collect_submodules("starlette")
 hiddenimports += collect_submodules("anyio")
 
+# ML stack — statsmodels is lazily imported inside ``ml.forecast``, and its
+# SARIMAX implementation string-loads ``statsmodels.tsa.statespace.*`` and
+# ``statsmodels.tools.*`` at fit time. scipy/numpy/pandas/patsy all have
+# plugin-style submodules loaded via entry_points or dynamic ``import_module``
+# calls — collect_submodules recursively captures them so the frozen build
+# doesn't die at training time with ``ModuleNotFoundError``.
+hiddenimports += collect_submodules("statsmodels")
+hiddenimports += collect_submodules("scipy")
+hiddenimports += collect_submodules("numpy")
+hiddenimports += collect_submodules("pandas")
+hiddenimports += collect_submodules("patsy")
+
 # Our own models module — env.py references it via ``from sidecar.db import models``
 # inside a function scope that PyInstaller may or may not trace. Explicit
-# include keeps migrations reliable.
+# include keeps migrations reliable. The ml.* modules likewise get lazy-
+# imported from the scheduler / API routers, so we pin them here too.
 hiddenimports += [
     "sidecar.db.models",
     "sidecar.db.base",
     "sidecar.db.engine",
     "sidecar.config",
+    "ml.forecast",
+    "ml.jobs",
+    "ml.persistence",
 ]
 
 # ---------------------------------------------------------------------------
