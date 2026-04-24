@@ -617,3 +617,57 @@ export function markAlertNotified(
     { signal },
   );
 }
+
+// ---------- Forecast ----------
+
+export interface ForecastPoint {
+  forecast_date: string; // YYYY-MM-DD
+  yhat: number;
+  lower_80: number;
+  upper_80: number;
+  lower_95: number;
+  upper_95: number;
+}
+
+export interface Forecast {
+  symbol: string;
+  asset_id: number;
+  model: string;
+  horizon_days: number;
+  training_rows: number;
+  last_close: string; // Decimal → serialised as string by Pydantic
+  last_close_date: string; // YYYY-MM-DD
+  generated_at: string; // ISO 8601 (may lack tz — treat as UTC)
+  points: ForecastPoint[];
+}
+
+export interface ForecastAvailability {
+  eligible: string[];
+  persisted: string[];
+}
+
+export function listForecastAvailability(
+  signal?: AbortSignal,
+): Promise<ForecastAvailability> {
+  return apiGet<ForecastAvailability>("/api/forecast/", { signal });
+}
+
+export function getForecast(
+  symbol: string,
+  signal?: AbortSignal,
+): Promise<Forecast> {
+  return apiGet<Forecast>(`/api/forecast/${encodeURIComponent(symbol)}/`, {
+    signal,
+  });
+}
+
+export function retrainForecast(
+  symbol: string,
+  signal?: AbortSignal,
+): Promise<Forecast> {
+  return apiPost<Forecast, Record<string, never>>(
+    `/api/forecast/${encodeURIComponent(symbol)}/retrain/`,
+    {},
+    { signal },
+  );
+}

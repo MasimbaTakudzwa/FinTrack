@@ -71,11 +71,12 @@ def test_bars_from_ohlc_parses_rows() -> None:
         [1745323200000, 100.0, 110.0, 95.0, 105.0],
         [1745326800000, 105.0, 115.0, 100.0, 112.5],
     ]
-    bars = _bars_from_ohlc("BTC-USD", rows)
+    bars = _bars_from_ohlc("BTC-USD", rows, "4h")
     assert len(bars) == 2
     assert bars[0].open == Decimal("100.0")
     assert bars[0].close == Decimal("105.0")
     assert bars[1].high == Decimal("115.0")
+    assert {b.interval for b in bars} == {"4h"}
 
 
 def test_bars_from_ohlc_skips_malformed_rows() -> None:
@@ -84,7 +85,7 @@ def test_bars_from_ohlc_skips_malformed_rows() -> None:
         [1745326800000, 100.0],
         [1745330400000, "bad", "data", "here", "sorry"],
     ]
-    bars = _bars_from_ohlc("BTC-USD", rows)
+    bars = _bars_from_ohlc("BTC-USD", rows, "4h")
     assert len(bars) == 1
 
 

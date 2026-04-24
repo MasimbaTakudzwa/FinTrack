@@ -67,6 +67,12 @@ class PricePoint(Base):
         ForeignKey("assets.id", ondelete="CASCADE"), index=True
     )
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Resolution of this bar. Two values are produced today: "5m" by the
+    # 5-minute intraday ingest (default for `ingest_prices`) and "1d" by the
+    # daily ingest added in Phase 2 as the training base for the forecasting
+    # engine. The column is free-form so future intervals ("1h", "15m", …)
+    # don't require another migration.
+    interval: Mapped[str] = mapped_column(String(16), default="5m")
     open: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     high: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     low: Mapped[Decimal] = mapped_column(Numeric(18, 6))
@@ -76,7 +82,12 @@ class PricePoint(Base):
     asset: Mapped[Asset] = relationship(back_populates="price_points")
 
     __table_args__ = (
-        UniqueConstraint("asset_id", "timestamp", name="uq_price_points_asset_ts"),
+        UniqueConstraint(
+            "asset_id",
+            "timestamp",
+            "interval",
+            name="uq_price_points_asset_ts_interval",
+        ),
         Index("ix_price_points_asset_ts", "asset_id", "timestamp"),
     )
 
@@ -274,3 +285,43 @@ class Setting(Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+
+
+class Forecast(Base):
+    """Latest forecast for a single asset.
+
+    At most one row per asset — a fresh retrain UPSERTs over the previous
+    result. We keep the points payload as JSON (rather than a separate
+    ``forecast_points`` table) because a 14-day horizon is only ~14 small
+    objects; the read path is always "hydrate the whole thing at once for
+    the chart" and the write path replaces the row wholesale. JSON keeps the
+    schema simple and makes it trivial to expand the point shape (e.g. add
+    99% CIs) without a migration.
+
+    ``last_close_*`` fields mirror the training-tail state at the moment the
+    forecast was generated — the UI compares them against today's latest
+    close to decide whether the forecast has drifted and is worth displaying.
+    """
+
+    __tablename__ = "forecasts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    model: Mapped[str] = mapped_column(String(64))
+    horizon_days: Mapped[int] = mapped_column(default=14)
+    training_rows: Mapped[int] = mapped_column(default=0)
+    last_close: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    last_close_date: Mapped[date] = mapped_column(Date)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+    # JSON-encoded list[ForecastPoint]. Decoded by the service layer so the
+    # DB model stays schema-free. See ml/persistence.py for the shape.
+    points_json: Mapped[str] = mapped_column(Text)
+
+    asset: Mapped[Asset] = relationship()

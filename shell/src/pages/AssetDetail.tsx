@@ -1,26 +1,35 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
+  Activity,
   ArrowDownRight,
   ArrowLeft,
   ArrowUpRight,
   Bell,
+  Eye,
+  EyeOff,
+  Loader2,
   Minus,
   MousePointerClick,
   Newspaper,
   RefreshCw,
+  Sparkles,
   X,
 } from "lucide-react";
 import {
   type Article,
   type Asset,
+  ApiError,
+  type Forecast,
   type PriceAlert,
   type PricePoint,
   type PriceSeries,
+  getForecast,
   getPriceSeries,
   listAlerts,
   listAssets,
   listNews,
+  retrainForecast,
 } from "../api/client";
 import { AlertCreateModal } from "../components/AlertCreateModal";
 import { CandleChart } from "../components/CandleChart";
@@ -192,7 +201,15 @@ export function AssetDetail() {
       )}
 
       {state.asset && state.series && (
-        <AssetBody asset={state.asset} series={state.series} dark={resolved === "dark"} />
+        // `key={symbol}` remounts the body on navigation so forecast / measure
+        // / timeframe state doesn't leak across assets (matches the NewsPanel
+        // pattern used inside).
+        <AssetBody
+          key={state.asset.symbol}
+          asset={state.asset}
+          series={state.series}
+          dark={resolved === "dark"}
+        />
       )}
     </div>
   );
@@ -263,6 +280,22 @@ function fmtDuration(ms: number): string {
 // Body
 // ---------------------------------------------------------------------------
 
+type ForecastStatus = "loading" | "ready" | "not_trained" | "error";
+
+interface ForecastState {
+  data: Forecast | null;
+  status: ForecastStatus;
+  error: string | null;
+  retraining: boolean;
+}
+
+const FORECAST_INITIAL: ForecastState = {
+  data: null,
+  status: "loading",
+  error: null,
+  retraining: false,
+};
+
 function AssetBody({
   asset,
   series,
@@ -278,6 +311,54 @@ function AssetBody({
   );
   const [tfId, setTfId] = useState<TimeframeId>("1D");
   const [measure, setMeasure] = useState<MeasureState>(MEASURE_EMPTY);
+  const [fc, setFc] = useState<ForecastState>(FORECAST_INITIAL);
+  const [showForecast, setShowForecast] = useState(false);
+
+  // Fetch the persisted forecast on mount. AssetBody is keyed on
+  // ``asset.symbol`` by the parent, so this effect only fires once per mount
+  // — initial state (``FORECAST_INITIAL.status = "loading"``) already drives
+  // the loading UI until the .then/.catch handlers flip status.
+  // 404 is the expected state for assets that haven't been trained yet —
+  // surface as ``not_trained`` so the panel shows a "Train now" CTA instead
+  // of an error.
+  useEffect(() => {
+    const controller = new AbortController();
+    getForecast(asset.symbol, controller.signal)
+      .then((data) => {
+        setFc({ data, status: "ready", error: null, retraining: false });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        if (err instanceof ApiError && err.status === 404) {
+          setFc({ data: null, status: "not_trained", error: null, retraining: false });
+          return;
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        setFc({ data: null, status: "error", error: msg, retraining: false });
+      });
+    return () => controller.abort();
+  }, [asset.symbol]);
+
+  const onRetrain = async () => {
+    setFc((s) => ({ ...s, retraining: true, error: null }));
+    try {
+      const data = await retrainForecast(asset.symbol);
+      setFc({ data, status: "ready", error: null, retraining: false });
+      // If the user hit "Train now" from a cold state, show them the result
+      // immediately — no point hiding what they just asked for.
+      setShowForecast(true);
+    } catch (err) {
+      let msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof ApiError) {
+        if (err.status === 422) {
+          msg =
+            "Not enough daily history yet. The daily-bar job needs " +
+            "to run for a while before SARIMAX can fit.";
+        }
+      }
+      setFc((s) => ({ ...s, retraining: false, error: msg }));
+    }
+  };
 
   const tf = TIMEFRAMES.find((t) => t.id === tfId) ?? TIMEFRAMES[TIMEFRAMES.length - 1];
   const visiblePoints = useMemo(
@@ -369,9 +450,36 @@ function AssetBody({
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
           <div className="mb-3 flex items-center justify-between gap-3">
             <TimeframePicker selected={tfId} onPick={onPickTf} />
-            <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 dark:text-zinc-500">
-              <MousePointerClick className="h-3 w-3" />
-              Click two points to measure
+            <div className="flex items-center gap-3 text-[11px] text-zinc-400 dark:text-zinc-500">
+              <button
+                type="button"
+                onClick={() => setShowForecast((v) => !v)}
+                disabled={fc.status !== "ready"}
+                title={
+                  fc.status === "ready"
+                    ? showForecast
+                      ? "Hide forecast overlay"
+                      : "Show forecast overlay"
+                    : "Forecast not ready yet"
+                }
+                className={[
+                  "inline-flex items-center gap-1 rounded-sm border px-2 py-0.5 transition-colors",
+                  showForecast && fc.status === "ready"
+                    ? "border-indigo-500/60 bg-indigo-500/10 text-indigo-700 dark:border-indigo-400/60 dark:text-indigo-300"
+                    : "border-zinc-200 text-zinc-500 hover:text-zinc-800 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200",
+                ].join(" ")}
+              >
+                {showForecast ? (
+                  <EyeOff className="h-3 w-3" />
+                ) : (
+                  <Eye className="h-3 w-3" />
+                )}
+                Forecast
+              </button>
+              <span className="inline-flex items-center gap-1.5">
+                <MousePointerClick className="h-3 w-3" />
+                Click two points to measure
+              </span>
             </div>
           </div>
 
@@ -383,6 +491,7 @@ function AssetBody({
             <CandleChart
               points={visiblePoints}
               dark={dark}
+              forecast={showForecast ? fc.data : null}
               measure={{
                 first: measure.first
                   ? {
@@ -421,6 +530,12 @@ function AssetBody({
               </span>
             )}
           </div>
+
+          <ForecastCaption
+            fc={fc}
+            showForecast={showForecast}
+            onRetrain={onRetrain}
+          />
         </div>
 
         <aside className="flex flex-col gap-4">
@@ -937,6 +1052,144 @@ function NewsPanel({ symbol }: { symbol: string }) {
           hideSymbol={symbol}
           density="compact"
         />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Forecast caption (inline under the chart card)
+// ---------------------------------------------------------------------------
+
+/**
+ * Takes an ISO-8601 timestamp (may be naive; SQLite strips tz — we coerce
+ * to UTC to keep "just now" accurate). Returns a coarse relative-time string.
+ */
+function fmtTrainedAgo(iso: string): string {
+  const normalised = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`;
+  const ms = Date.now() - Date.parse(normalised);
+  if (!Number.isFinite(ms) || ms < 0) return "just now";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.round(h / 24);
+  if (d < 7) return `${d}d ago`;
+  return `${Math.round(d / 7)}w ago`;
+}
+
+function ForecastCaption({
+  fc,
+  showForecast,
+  onRetrain,
+}: {
+  fc: ForecastState;
+  showForecast: boolean;
+  onRetrain: () => void;
+}) {
+  // Loading on mount — deliberately quiet, no skeleton shift.
+  if (fc.status === "loading") {
+    return (
+      <div className="mt-3 flex items-center gap-2 border-t border-zinc-200 pt-3 text-[11px] text-zinc-400 dark:border-zinc-800 dark:text-zinc-500">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        Loading forecast…
+      </div>
+    );
+  }
+
+  if (fc.status === "error") {
+    return (
+      <div className="mt-3 flex items-center justify-between gap-3 border-t border-zinc-200 pt-3 text-[11px] dark:border-zinc-800">
+        <span className="text-rose-600 dark:text-rose-400">
+          Forecast failed to load: {fc.error}
+        </span>
+        <button
+          type="button"
+          onClick={onRetrain}
+          disabled={fc.retraining}
+          className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-white px-2 py-1 font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+        >
+          <RefreshCw
+            className={`h-3 w-3 ${fc.retraining ? "animate-spin" : ""}`}
+          />
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (fc.status === "not_trained") {
+    return (
+      <div className="mt-3 flex items-center justify-between gap-3 border-t border-zinc-200 pt-3 text-[11px] dark:border-zinc-800">
+        <span className="inline-flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400">
+          <Sparkles className="h-3 w-3" />
+          No forecast trained yet. SARIMAX fits a 14-day projection from your
+          daily closes.
+        </span>
+        <button
+          type="button"
+          onClick={onRetrain}
+          disabled={fc.retraining}
+          className="inline-flex items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/10 px-2 py-1 font-semibold text-indigo-700 hover:bg-indigo-500/15 disabled:opacity-50 dark:border-indigo-400/40 dark:text-indigo-300"
+        >
+          {fc.retraining ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <Sparkles className="h-3 w-3" />
+          )}
+          {fc.retraining ? "Training…" : "Train now"}
+        </button>
+      </div>
+    );
+  }
+
+  // status === "ready"
+  const data = fc.data;
+  if (!data) return null;
+
+  return (
+    <div className="mt-3 flex items-center justify-between gap-3 border-t border-zinc-200 pt-3 text-[11px] dark:border-zinc-800">
+      <span className="inline-flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400">
+        <Activity className="h-3 w-3" />
+        Model: <span className="font-medium text-zinc-700 dark:text-zinc-300">{data.model}</span>
+        <span className="text-zinc-300 dark:text-zinc-600">·</span>
+        Trained{" "}
+        <span className="font-medium text-zinc-700 dark:text-zinc-300">
+          {fmtTrainedAgo(data.generated_at)}
+        </span>
+        <span className="text-zinc-300 dark:text-zinc-600">·</span>
+        <span className="font-medium text-zinc-700 dark:text-zinc-300">
+          {data.training_rows}
+        </span>{" "}
+        daily closes
+        <span className="text-zinc-300 dark:text-zinc-600">·</span>
+        <span className="font-medium text-zinc-700 dark:text-zinc-300">
+          {data.horizon_days}-day
+        </span>{" "}
+        horizon
+        {showForecast && (
+          <span className="ml-2 rounded-full bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300">
+            80% / 95% CI
+          </span>
+        )}
+      </span>
+      <div className="flex items-center gap-2">
+        {fc.error && (
+          <span className="text-rose-600 dark:text-rose-400">{fc.error}</span>
+        )}
+        <button
+          type="button"
+          onClick={onRetrain}
+          disabled={fc.retraining}
+          className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-white px-2 py-1 font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+        >
+          <RefreshCw
+            className={`h-3 w-3 ${fc.retraining ? "animate-spin" : ""}`}
+          />
+          {fc.retraining ? "Retraining…" : "Retrain"}
+        </button>
       </div>
     </div>
   );

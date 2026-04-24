@@ -1,0 +1,11 @@
+# Phase 2 local ML deps — install on top of requirements.txt to enable the
+# forecasting engine. statsmodels ships SARIMAX plus dozens of time-series
+# tools; numpy / scipy / pandas / patsy come along as transitive deps.
+#
+# Intentionally lightweight: no TensorFlow, no PyTorch, no ONNX runtime in
+# Phase 2's first iteration — we start with a classical statistical model
+# because (a) SARIMAX fits in <1 s per asset on a modern CPU, (b) it doesn't
+# need a GPU on user machines, (c) the installer stays small (~50 MB extra
+# vs. ~1 GB for TF), and (d) out-of-the-box confidence intervals come for
+# free from the likelihood. Swap to a richer model later if warranted.
+statsmodels>=0.14,<0.16

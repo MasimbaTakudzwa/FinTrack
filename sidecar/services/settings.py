@@ -123,6 +123,66 @@ SETTINGS_SPECS: tuple[SettingSpec, ...] = (
         max=23,
     ),
     SettingSpec(
+        key="ingest_prices_daily.enabled",
+        type=SettingType.BOOL,
+        env_attr="enable_prices_daily_job",
+        default=True,
+        label="Enable daily price backfill",
+        description=(
+            "Once-per-day pull of 5y of daily closes per asset. Required for "
+            "the forecasting engine to have enough history to train. Disable "
+            "to pause the backfill without affecting intraday 5-min ingest."
+        ),
+    ),
+    SettingSpec(
+        key="ingest_prices_daily.cron_hour_utc",
+        type=SettingType.INT,
+        env_attr="ingest_prices_daily_cron_hour",
+        default=22,
+        label="Daily ingest hour (UTC)",
+        description=(
+            "Hour of day (0-23 UTC) when the daily close-bar pull runs. "
+            "Default 22 UTC is ~6pm ET, after US markets close."
+        ),
+        min=0,
+        max=23,
+    ),
+    SettingSpec(
+        key="train_forecasts.enabled",
+        type=SettingType.BOOL,
+        env_attr="enable_forecasts_job",
+        default=True,
+        label="Enable weekly forecast retraining",
+        description=(
+            "Weekly SARIMAX fit on the daily-close history for every active "
+            "asset. Disable to stop automatic retraining (user-triggered "
+            "retrains still work regardless)."
+        ),
+    ),
+    SettingSpec(
+        key="train_forecasts.cron_day_of_week",
+        type=SettingType.INT,
+        env_attr="train_forecasts_cron_day_of_week",
+        default=6,
+        label="Forecast retrain weekday",
+        description=(
+            "Day of week for the weekly retrain job. 0=Monday, 6=Sunday. "
+            "Default Sunday so Monday's dashboard shows fresh forecasts."
+        ),
+        min=0,
+        max=6,
+    ),
+    SettingSpec(
+        key="train_forecasts.cron_hour_utc",
+        type=SettingType.INT,
+        env_attr="train_forecasts_cron_hour",
+        default=23,
+        label="Forecast retrain hour (UTC)",
+        description="Hour of day (0-23 UTC) for the weekly retrain job.",
+        min=0,
+        max=23,
+    ),
+    SettingSpec(
         key="check_alerts.enabled",
         type=SettingType.BOOL,
         env_attr="enable_alerts_job",

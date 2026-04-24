@@ -72,7 +72,22 @@ def _fetch_ohlc(coin_id: str, *, vs_currency: str = "usd", days: int = 1) -> lis
     return data
 
 
-def _bars_from_ohlc(symbol: str, rows: list[list[float]]) -> list[PriceBar]:
+def _interval_for_days(days: int) -> str:
+    """Map CoinGecko's `days` param to the bar resolution it returns.
+
+    CoinGecko /coins/{id}/ohlc documents: 1 day -> 30min bars, 2-30 days ->
+    4h bars, 31+ days -> 4d bars. We tag each bar with the matching string so
+    the opt-in crypto job doesn't collide with yfinance's "5m" intraday rows
+    or with the forecasting engine's "1d" training rows.
+    """
+    if days <= 1:
+        return "30m"
+    if days <= 30:
+        return "4h"
+    return "4d"
+
+
+def _bars_from_ohlc(symbol: str, rows: list[list[float]], interval: str) -> list[PriceBar]:
     bars: list[PriceBar] = []
     for row in rows:
         if len(row) < 5:
@@ -94,6 +109,7 @@ def _bars_from_ohlc(symbol: str, rows: list[list[float]]) -> list[PriceBar]:
                 low=low,
                 close=c,
                 volume=0,
+                interval=interval,
             )
         )
     return bars
@@ -104,8 +120,10 @@ def fetch_crypto_prices(symbols: Iterable[str], *, days: int = 1) -> list[PriceB
 
     CoinGecko's /coins/{id}/ohlc endpoint does not include volume, so bars
     are emitted with volume=0. Symbols without a CoinGecko mapping are
-    skipped with a warning.
+    skipped with a warning. Bars are tagged with the interval CoinGecko's
+    `days` param induces — see `_interval_for_days`.
     """
+    interval = _interval_for_days(days)
     all_bars: list[PriceBar] = []
     seen: set[str] = set()
     for sym in symbols:
@@ -122,5 +140,5 @@ def fetch_crypto_prices(symbols: Iterable[str], *, days: int = 1) -> list[PriceB
         except FetcherError as exc:
             logger.warning("CoinGecko fetch failed for %s (%s): %s", sym_up, coin_id, exc)
             continue
-        all_bars.extend(_bars_from_ohlc(sym_up, rows))
+        all_bars.extend(_bars_from_ohlc(sym_up, rows, interval))
     return all_bars
