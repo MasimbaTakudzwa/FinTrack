@@ -87,6 +87,12 @@ class SentimentTimeseriesOut(BaseModel):
     points: list[SentimentTimeseriesPoint]
 
 
+class ScoreNowResponse(BaseModel):
+    """Result of an on-demand sentiment backfill kicked off from Settings."""
+
+    scored: int
+
+
 @router.get("/", response_model=ArticleListOut)
 def list_news(
     symbol: Annotated[str | None, Query()] = None,
@@ -247,6 +253,31 @@ def sentiment_summary(
             negative=negative,
             mean=mean,
         )
+
+
+@router.post("/score-now/", response_model=ScoreNowResponse)
+def score_now() -> ScoreNowResponse:
+    """Run the VADER backfill synchronously across every unscored article.
+
+    Surfaced in Settings → ML controls so the user can drain the unscored
+    queue without waiting for the next scheduler tick (60 minutes by
+    default). Lazy-imports the ML jobs module so a sidecar built without
+    ``requirements-ml.txt`` returns 503 cleanly instead of importing into
+    a blank backend at startup.
+    """
+    try:
+        from ml.jobs import score_articles
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Sentiment backend is not installed in this build "
+                f"({exc}); run pip install -r requirements-ml.txt"
+            ),
+        ) from exc
+
+    scored = score_articles()
+    return ScoreNowResponse(scored=scored)
 
 
 @router.get(

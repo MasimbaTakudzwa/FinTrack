@@ -35,6 +35,7 @@ def test_get_config_returns_defaults(isolated_db: Path) -> None:
         "check_alerts.interval_minutes",
         "score_news_sentiment.enabled",
         "score_news_sentiment.interval_minutes",
+        "forecast.default_engine",
     }
 
     by_key = {s["key"]: s for s in body["settings"]}
@@ -143,7 +144,7 @@ def test_put_empty_updates_noop(isolated_db: Path) -> None:
     r = client.put("/api/config/", json={"updates": {}})
     assert r.status_code == 200
     # Should return current state without error.
-    assert len(r.json()["settings"]) == 16
+    assert len(r.json()["settings"]) == 17
 
 
 def test_put_atomic_on_validation_failure(isolated_db: Path) -> None:

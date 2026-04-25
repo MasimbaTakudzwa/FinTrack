@@ -50,6 +50,7 @@ DEFAULT_CONFIG = {
     "check_alerts.interval_minutes": 1,
     "score_news_sentiment.enabled": True,
     "score_news_sentiment.interval_minutes": 60,
+    "forecast.default_engine": "sarimax",
 }
 
 

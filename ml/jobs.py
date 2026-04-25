@@ -37,6 +37,9 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ml.forecast import (
+    DEFAULT_ENGINE,
+    ENGINES,
+    ForecastEngine,
     ForecastError,
     ForecastFitError,
     ForecastResult,
@@ -53,6 +56,30 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HORIZON_DAYS = 14
 DEFAULT_SENTIMENT_BATCH_SIZE = 200
+
+
+def _resolve_engine(engine: ForecastEngine | None) -> ForecastEngine:
+    """Pick the effective engine — explicit arg wins, otherwise the user's
+    Settings choice, otherwise the hard-coded default. Lazy import of the
+    settings service avoids a circular import (ml → sidecar.services →
+    sidecar.db → models which already imports ml indirectly via SQLEnums in
+    some test paths).
+    """
+    if engine is not None:
+        if engine not in ENGINES:
+            raise ForecastError(
+                f"unknown engine {engine!r}; expected one of {sorted(ENGINES)}"
+            )
+        return engine
+    try:
+        from sidecar.services.settings import load_effective_config
+
+        configured = load_effective_config().get("forecast.default_engine")
+    except Exception:  # pragma: no cover — defensive (DB not migrated yet, etc.)
+        return DEFAULT_ENGINE
+    if isinstance(configured, str) and configured in ENGINES:
+        return configured
+    return DEFAULT_ENGINE
 
 
 class UnknownSymbolError(ForecastError):
@@ -98,6 +125,7 @@ def _active_asset_symbol_ids(session: Session) -> list[tuple[int, str]]:
 def train_forecasts(
     *,
     horizon_days: int = DEFAULT_HORIZON_DAYS,
+    engine: ForecastEngine | None = None,
 ) -> int:
     """Retrain the forecast for every active asset. Returns count of successes.
 
@@ -105,7 +133,11 @@ def train_forecasts(
     are logged at warning-or-error level and **swallowed** — the point of
     the weekly job is "make progress", not "all or nothing". User-triggered
     retrains use ``train_one`` which surfaces errors.
+
+    ``engine=None`` defers to the user's Settings choice (or the default
+    SARIMAX when no setting is configured).
     """
+    effective_engine = _resolve_engine(engine)
     successes = 0
     with session_scope() as session:
         assets = _active_asset_symbol_ids(session)
@@ -116,7 +148,12 @@ def train_forecasts(
 
     for asset_id, symbol in assets:
         try:
-            _train_one_inner(asset_id, symbol, horizon_days=horizon_days)
+            _train_one_inner(
+                asset_id,
+                symbol,
+                horizon_days=horizon_days,
+                engine=effective_engine,
+            )
             successes += 1
         except InsufficientDataError as exc:
             logger.info(
@@ -131,9 +168,10 @@ def train_forecasts(
         except Exception:  # pragma: no cover — truly defensive
             logger.exception("train_forecasts: unexpected error for %s", symbol)
     logger.info(
-        "train_forecasts: retrained %d / %d active assets",
+        "train_forecasts: retrained %d / %d active assets via %s",
         successes,
         len(assets),
+        effective_engine,
     )
     return successes
 
@@ -142,8 +180,11 @@ def train_one(
     symbol: str,
     *,
     horizon_days: int = DEFAULT_HORIZON_DAYS,
+    engine: ForecastEngine | None = None,
 ) -> ForecastResult:
     """Retrain the forecast for a single symbol and return the fitted result.
+
+    ``engine`` defers to the configured default when ``None``.
 
     Raises:
         UnknownSymbolError: when ``symbol`` doesn't match a tracked asset.
@@ -157,7 +198,9 @@ def train_one(
         ).scalar_one_or_none()
     if row is None:
         raise UnknownSymbolError(f"no tracked asset with symbol {sym!r}")
-    return _train_one_inner(int(row), sym, horizon_days=horizon_days)
+    return _train_one_inner(
+        int(row), sym, horizon_days=horizon_days, engine=_resolve_engine(engine)
+    )
 
 
 def _train_one_inner(
@@ -165,22 +208,25 @@ def _train_one_inner(
     symbol: str,
     *,
     horizon_days: int,
+    engine: ForecastEngine,
 ) -> ForecastResult:
     """Shared fit+persist path used by both the batch job and the API retrain.
 
     Split out so ``train_forecasts`` doesn't re-resolve the symbol it already
     has in hand, while ``train_one`` gets the same code path after its own
-    lookup.
+    lookup. ``engine`` is always concrete here — callers resolve via
+    ``_resolve_engine`` before reaching this layer.
     """
     with session_scope() as session:
         closes = _load_daily_closes(session, asset_id)
     # `forecast_series` validates MIN_TRAINING_ROWS + ordering; let its
     # exceptions propagate.
-    result = forecast_series(closes, horizon_days=horizon_days)
+    result = forecast_series(closes, horizon_days=horizon_days, engine=engine)
     save_forecast(asset_id, result)
     logger.info(
-        "trained forecast for %s: training_rows=%d horizon=%d last_close=%s",
+        "trained forecast for %s via %s: training_rows=%d horizon=%d last_close=%s",
         symbol,
+        engine,
         result.training_rows,
         result.horizon_days,
         result.last_close,

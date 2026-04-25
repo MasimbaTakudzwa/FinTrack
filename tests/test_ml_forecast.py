@@ -13,8 +13,11 @@ from datetime import date, timedelta
 import pytest
 
 from ml.forecast import (
+    ENGINES,
+    HOLT_WINTERS_MODEL_NAME,
     MIN_TRAINING_ROWS,
     MODEL_NAME,
+    SARIMAX_MODEL_NAME,
     ForecastError,
     ForecastPoint,
     ForecastResult,
@@ -105,3 +108,52 @@ def test_forecast_point_is_frozen_dataclass() -> None:
     )
     with pytest.raises(Exception):  # FrozenInstanceError subclasses AttributeError
         p.yhat = 2.0  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Engine selection — both dispatched implementations
+# ---------------------------------------------------------------------------
+
+
+def test_default_engine_is_sarimax() -> None:
+    """``forecast_series`` without an explicit engine fits SARIMAX (the
+    historical behaviour pre-multi-engine refactor)."""
+    series = _gen_series(80)
+    result = forecast_series(series, horizon_days=7)
+    assert result.model == SARIMAX_MODEL_NAME == MODEL_NAME
+
+
+def test_holt_winters_engine_fits_and_emits_horizon_points() -> None:
+    series = _gen_series(120)
+    result = forecast_series(series, horizon_days=14, engine="holt_winters")
+
+    assert result.model == HOLT_WINTERS_MODEL_NAME
+    assert len(result.points) == 14
+    assert result.training_rows == 120
+    # Forecast dates remain calendar-consecutive across engines.
+    last = series[-1][0]
+    for i, point in enumerate(result.points):
+        assert point.forecast_date == last + timedelta(days=i + 1)
+
+
+def test_holt_winters_engine_ci_bands_ordered() -> None:
+    """ETS prediction intervals must obey 95% ⊇ 80% ⊇ point estimate, same
+    invariant as SARIMAX. Catches any future regression in the column-
+    indexing path inside ``_materialise_points``."""
+    series = _gen_series(100)
+    result = forecast_series(series, horizon_days=10, engine="holt_winters")
+    for p in result.points:
+        assert p.lower_95 <= p.lower_80 <= p.yhat <= p.upper_80 <= p.upper_95
+
+
+def test_unknown_engine_raises_forecast_error() -> None:
+    series = _gen_series(80)
+    with pytest.raises(ForecastError) as exc:
+        forecast_series(series, horizon_days=7, engine="prophet")  # type: ignore[arg-type]
+    assert "engine" in str(exc.value).lower()
+
+
+def test_engines_constant_is_stable() -> None:
+    """Catches accidental drift in the literal set — must stay aligned with
+    the API's `_validate_engine_param` and the Settings dropdown."""
+    assert set(ENGINES) == {"sarimax", "holt_winters"}

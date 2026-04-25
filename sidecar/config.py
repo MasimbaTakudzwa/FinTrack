@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # articles need a one-off catch-up. Hourly default keeps the job cheap
     # while still catching anything the inline path missed.
     score_news_sentiment_interval_minutes: int = 60
+    # Default model used by the forecasting engine when the user doesn't
+    # pick one explicitly. Constrained at validation time to the literal
+    # set in ``ml.forecast.ENGINES``.
+    forecast_default_engine: str = "sarimax"
 
     def resolved_db_path(self) -> str:
         return self.db_path or _default_db_path()

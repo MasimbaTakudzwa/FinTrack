@@ -77,7 +77,11 @@ def test_list_availability_empty_when_no_assets(isolated_db: Path) -> None:
     with TestClient(app) as client:
         resp = client.get("/api/forecast/")
         assert resp.status_code == 200
-        assert resp.json() == {"eligible": [], "persisted": []}
+        assert resp.json() == {
+            "eligible": [],
+            "persisted": [],
+            "engines": ["sarimax", "holt_winters"],
+        }
 
 
 def test_list_availability_eligible_without_persisted(isolated_db: Path) -> None:
@@ -247,3 +251,117 @@ def test_retrain_overwrites_previous_forecast(isolated_db: Path) -> None:
 
         avail = client.get("/api/forecast/").json()
         assert avail["persisted"] == ["AAPL"]  # still exactly one
+
+
+# ---------------------------------------------------------------------------
+# Engine selection on retrain
+# ---------------------------------------------------------------------------
+
+
+def test_retrain_default_engine_is_sarimax(isolated_db: Path) -> None:
+    """No ``engine=`` param → SARIMAX (the historical default)."""
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        resp = client.post("/api/forecast/AAPL/retrain/")
+        assert resp.status_code == 200
+        assert "SARIMAX" in resp.json()["model"]
+
+
+def test_retrain_with_explicit_engine_uses_holt_winters(
+    isolated_db: Path,
+) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/forecast/AAPL/retrain/", params={"engine": "holt_winters"}
+        )
+        assert resp.status_code == 200
+        assert "Holt-Winters" in resp.json()["model"]
+
+
+def test_retrain_unknown_engine_returns_422(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/forecast/AAPL/retrain/", params={"engine": "prophet"}
+        )
+        assert resp.status_code == 422
+        assert "prophet" in resp.json()["detail"].lower()
+
+
+def test_availability_returns_engine_list(isolated_db: Path) -> None:
+    """The availability endpoint exposes the canonical engine literals so the
+    UI selector doesn't have to hard-code them."""
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/")
+        body = resp.json()
+        assert body["engines"] == ["sarimax", "holt_winters"]
+
+
+# ---------------------------------------------------------------------------
+# Bulk admin endpoints (Settings → ML controls)
+# ---------------------------------------------------------------------------
+
+
+def test_retrain_all_returns_counts(isolated_db: Path) -> None:
+    """Two eligible assets, one with enough rows to actually fit, one not."""
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    _seed_asset_with_daily_closes("MSFT", n_rows=10)
+
+    with TestClient(app) as client:
+        resp = client.post("/api/forecast/retrain-all/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["requested"] == 2
+        assert body["trained"] == 1
+        assert body["skipped"] == 1
+        assert body["engine"] in {"sarimax", "holt_winters"}
+
+
+def test_retrain_all_with_explicit_engine(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/forecast/retrain-all/", params={"engine": "holt_winters"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["engine"] == "holt_winters"
+
+        # The persisted forecast is from the requested engine.
+        forecast = client.get("/api/forecast/AAPL/").json()
+        assert "Holt-Winters" in forecast["model"]
+
+
+def test_retrain_all_no_eligible_assets_returns_zeros(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.post("/api/forecast/retrain-all/")
+        body = resp.json()
+        assert body["requested"] == 0
+        assert body["trained"] == 0
+        assert body["skipped"] == 0
+
+
+def test_clear_all_forecasts_wipes_persisted(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        # Seed one persisted forecast first.
+        client.post("/api/forecast/AAPL/retrain/")
+        avail_before = client.get("/api/forecast/").json()
+        assert avail_before["persisted"] == ["AAPL"]
+
+        resp = client.delete("/api/forecast/")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 1
+
+        avail_after = client.get("/api/forecast/").json()
+        assert avail_after["persisted"] == []
+        # Eligibility is unchanged — clearing forecasts doesn't touch
+        # price_points.
+        assert avail_after["eligible"] == ["AAPL"]
+
+
+def test_clear_all_forecasts_with_no_rows_returns_zero(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.delete("/api/forecast/")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 0

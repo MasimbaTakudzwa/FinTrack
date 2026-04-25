@@ -7,14 +7,20 @@
 - ``GET /api/forecast/{symbol}/`` — latest persisted forecast for a symbol.
   404 when the symbol is unknown OR when the asset exists but has no
   forecast row yet (the UI distinguishes via the ``eligible`` list).
-- ``POST /api/forecast/{symbol}/retrain/`` — synchronous retrain. Writes the
-  new forecast to the ``forecasts`` table and returns it. SARIMAX fits in
-  under a second on the modern-daily-bar volume we carry, so we don't need a
-  background-job indirection here.
+- ``POST /api/forecast/{symbol}/retrain/?engine=...`` — synchronous retrain.
+  Writes the new forecast to the ``forecasts`` table and returns it. Both
+  SARIMAX and Holt-Winters fit in under a second on the modern-daily-bar
+  volume we carry, so we don't need a background-job indirection here.
+- ``POST /api/forecast/retrain-all/`` — kick off a synchronous full-batch
+  retrain across every active asset. Per-asset failures are swallowed by
+  the underlying ``ml.jobs.train_forecasts``; the response reports counts.
+- ``DELETE /api/forecast/`` — wipe every stored forecast (used after the
+  user switches engines and wants a clean slate). Doesn't touch
+  ``price_points`` / ``articles`` — only the ``forecasts`` table.
 
 Error mapping:
 - 404 — unknown symbol / no forecast available
-- 422 — InsufficientDataError (not enough daily closes to train yet)
+- 422 — validation failure (insufficient data, invalid engine)
 - 500 — ForecastFitError (statsmodels optimiser couldn't converge)
 """
 
@@ -23,11 +29,15 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from ml.forecast import (
+    ENGINES,
+    ForecastEngine,
+    ForecastError,
     ForecastFitError,
     ForecastResult,
     InsufficientDataError,
@@ -35,9 +45,14 @@ from ml.forecast import (
 from ml.jobs import (
     UnknownSymbolError,
     symbols_eligible_for_forecast,
+    train_forecasts,
     train_one,
 )
-from ml.persistence import load_forecast_by_symbol
+from ml.persistence import (
+    all_forecast_asset_ids,
+    delete_forecast,
+    load_forecast_by_symbol,
+)
 
 router = APIRouter(prefix="/api/forecast", tags=["forecast"])
 
@@ -76,10 +91,28 @@ class ForecastAvailabilityModel(BaseModel):
     ``eligible`` is a superset of ``persisted`` — if an asset is eligible but
     not persisted, the UI can offer a "Train now" button. If persisted, the UI
     fetches via ``GET /api/forecast/{symbol}/`` without further checks.
+    ``engines`` lists every engine the backend can fit so the UI's selector
+    doesn't have to hard-code the literal set.
     """
 
     eligible: list[str]
     persisted: list[str]
+    engines: list[str]
+
+
+class RetrainAllResponse(BaseModel):
+    """Result of a full-batch retrain — counts only, not per-asset payload."""
+
+    requested: int
+    trained: int
+    skipped: int
+    engine: str
+
+
+class ClearForecastsResponse(BaseModel):
+    """Tally of forecasts removed by the bulk-clear endpoint."""
+
+    deleted: int
 
 
 # ---------------------------------------------------------------------------
@@ -118,14 +151,14 @@ def _to_response(symbol: str, asset_id: int, r: ForecastResult) -> ForecastRespo
 
 @router.get("/", response_model=ForecastAvailabilityModel)
 def list_forecast_availability() -> ForecastAvailabilityModel:
-    """Return the symbols eligible to forecast + those that already have one.
+    """Return the symbols eligible to forecast + those that already have one,
+    plus the canonical list of engines the backend can fit.
 
     Cheap: two small SELECTs. The UI calls this once on app boot or when the
     "Forecast" toggle is first surfaced and caches the result for the session.
     """
     from sqlalchemy import select
 
-    from ml.persistence import all_forecast_asset_ids
     from sidecar.db.engine import session_scope
     from sidecar.db.models import Asset
 
@@ -147,7 +180,28 @@ def list_forecast_availability() -> ForecastAvailabilityModel:
     else:
         persisted = []
 
-    return ForecastAvailabilityModel(eligible=eligible, persisted=persisted)
+    return ForecastAvailabilityModel(
+        eligible=eligible,
+        persisted=persisted,
+        engines=list(ENGINES),
+    )
+
+
+def _validate_engine_param(raw: str | None) -> ForecastEngine | None:
+    """Coerce a free-form ``engine=`` query string to the typed literal.
+
+    None passes through unchanged (caller defers to the user's setting).
+    Anything outside ``ENGINES`` raises 422 via the FastAPI exception path —
+    same convention we use for invalid sentiment buckets.
+    """
+    if raw is None or raw == "":
+        return None
+    if raw not in ENGINES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown engine {raw!r}; expected one of {sorted(ENGINES)}",
+        )
+    return raw
 
 
 @router.get("/{symbol}/", response_model=ForecastResponseModel)
@@ -169,11 +223,19 @@ def get_forecast(symbol: str) -> ForecastResponseModel:
 
 
 @router.post("/{symbol}/retrain/", response_model=ForecastResponseModel)
-def retrain_forecast(symbol: str) -> ForecastResponseModel:
-    """Fit SARIMAX synchronously and persist the result. Returns the new forecast."""
+def retrain_forecast(
+    symbol: str,
+    engine: Annotated[str | None, Query()] = None,
+) -> ForecastResponseModel:
+    """Fit a forecast synchronously and persist the result. Returns the new forecast.
+
+    ``engine`` accepts ``"sarimax"`` or ``"holt_winters"``; omit the query
+    parameter to defer to the user's Settings choice.
+    """
     sym = symbol.strip().upper()
+    chosen = _validate_engine_param(engine)
     try:
-        result = train_one(sym)
+        result = train_one(sym, engine=chosen)
     except UnknownSymbolError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except InsufficientDataError as exc:
@@ -181,6 +243,10 @@ def retrain_forecast(symbol: str) -> ForecastResponseModel:
         # well-formed, but the asset isn't ready to train yet (backfill in
         # flight). The UI surfaces this with a friendly "need more history"
         # message.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ForecastError as exc:
+        # Catches "unknown engine" too if the route is hit with a typo we
+        # missed in `_validate_engine_param`. 422 matches.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ForecastFitError as exc:
         # 500 is the right answer here — the model refused to converge on
@@ -197,3 +263,66 @@ def retrain_forecast(symbol: str) -> ForecastResponseModel:
         raise HTTPException(status_code=500, detail="forecast disappeared post-train")
     asset_id, _ = loaded
     return _to_response(sym, asset_id, result)
+
+
+@router.post("/retrain-all/", response_model=RetrainAllResponse)
+def retrain_all_forecasts(
+    engine: Annotated[str | None, Query()] = None,
+) -> RetrainAllResponse:
+    """Synchronously retrain every active asset's forecast.
+
+    Per-asset failures (insufficient data / fit failure) are swallowed by
+    the underlying job — same semantics as the weekly scheduled run — so
+    the response reports `requested` (active asset count), `trained`
+    (successes), and `skipped` (the difference). UI shows the counts with
+    a hint to check the asset detail pages for which ones bombed.
+
+    ``engine`` accepts ``"sarimax"`` or ``"holt_winters"`` (omit to use
+    the user's Settings default).
+    """
+    chosen = _validate_engine_param(engine)
+    eligible = list(symbols_eligible_for_forecast())
+    requested = len(eligible)
+    trained = train_forecasts(engine=chosen)
+    return RetrainAllResponse(
+        requested=requested,
+        trained=trained,
+        skipped=max(requested - trained, 0),
+        # Resolve the effective engine string for the response so the UI
+        # can label the toast accurately even when the caller passed None.
+        engine=chosen or _resolved_default_engine(),
+    )
+
+
+def _resolved_default_engine() -> str:
+    """Return the engine that ``ml.jobs._resolve_engine(None)`` would pick.
+
+    Duplicated here (instead of importing the private helper) so the API
+    layer doesn't reach into ``ml`` internals; the lookup is cheap and the
+    fallback chain is identical.
+    """
+    try:
+        from sidecar.services.settings import load_effective_config
+
+        configured = load_effective_config().get("forecast.default_engine")
+        if isinstance(configured, str) and configured in ENGINES:
+            return configured
+    except Exception:  # pragma: no cover — defensive
+        pass
+    return "sarimax"
+
+
+@router.delete("/", response_model=ClearForecastsResponse)
+def clear_all_forecasts() -> ClearForecastsResponse:
+    """Wipe every stored forecast.
+
+    Used after the user switches engines (they want the next chart load to
+    show only forecasts produced by the new engine). The price_points and
+    articles tables are untouched — re-running ``retrain-all`` immediately
+    rebuilds the corpus.
+    """
+    deleted = 0
+    for asset_id in list(all_forecast_asset_ids()):
+        if delete_forecast(asset_id):
+            deleted += 1
+    return ClearForecastsResponse(deleted=deleted)

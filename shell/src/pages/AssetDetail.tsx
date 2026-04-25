@@ -354,7 +354,7 @@ function AssetBody({
         if (err.status === 422) {
           msg =
             "Not enough daily history yet. The daily-bar job needs " +
-            "to run for a while before SARIMAX can fit.";
+            "to run for a while before the forecaster can fit.";
         }
       }
       setFc((s) => ({ ...s, retraining: false, error: msg }));
@@ -1127,8 +1127,8 @@ function ForecastCaption({
       <div className="mt-3 flex items-center justify-between gap-3 border-t border-zinc-200 pt-3 text-[11px] dark:border-zinc-800">
         <span className="inline-flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400">
           <Sparkles className="h-3 w-3" />
-          No forecast trained yet. SARIMAX fits a 14-day projection from your
-          daily closes.
+          No forecast trained yet. The default engine fits a 14-day projection
+          from your daily closes (change it in Settings → ML).
         </span>
         <button
           type="button"

@@ -12,7 +12,7 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-25 — Session 006 (Phase 2 ML completion — VADER sentiment end-to-end + sentiment-vs-price daily timeline + CI fix for `requirements-ml.txt` install path)
+**Last updated:** 2026-04-25 — Session 006 (Phase 2 ML completion — VADER sentiment + sentiment timeline + Holt-Winters engine alongside SARIMAX + Settings-UI ML controls)
 **Active sprint:** Sprint 6 — Phase 2 ML (daily-bar layer ✅, SARIMAX engine ✅, forecast API ✅, AssetDetail overlay + toggle + retrain button ✅, PyInstaller spec updated for statsmodels/scipy/numpy/pandas/patsy ✅, version bumped to 0.2.0 across all 6 manifests ✅, README refreshed ✅, v0.2.0 rebased cleanly onto reconciled main ✅; final `.app` bundle + live smoke + tag-push pending)
 **Overall status:** 🟢 Phase 1 complete (Sprints 1–5). Phase 2 first iteration shipping — 14-day SARIMAX forecast with 80%/95% CI bands overlays the asset chart, nightly auto-retrain plus on-demand "Retrain now" per asset, all running locally in the sidecar against the user's own daily-close history. Post-rebase verification: `pytest` **328/328 green** (up from 304 — main's name-search tests layered in), `ruff check .` clean, `mypy --strict sidecar/` clean on 41 files, `mypy --strict ml/` clean on 4 files, `pnpm -C shell build` clean (581 kB JS / 178 kB gzipped). Branch lineage now linear on main via checkpoints 20 (macro fire-on-first-add + chunk fix, PR #6), 21 (name-based search + TTL cache + debounce), 22 (yfinance.Search swap), then 3 Sprint 6 commits on `claude/phase2-sarimax-v0.2.0` on top.
 
@@ -57,7 +57,43 @@ User pivoted: "stop thinking about shipping small patches and functionality. I r
   - `test_ingest_news.py` (+2): newly-inserted articles get sentiment scores inline + already-scored rows aren't re-scored.
   - `test_migrations.py` (+1): 0010 adds nullable Float `sentiment` column + `ix_articles_sentiment` index.
   - Test counts in `test_api_config.py` / `test_settings_service.py` / `test_scheduler_reconfigure.py` bumped from 14 → 16 keys.
-- **Verifications**: `pytest` **366/366 green** (+38 over Session 005's 328), `ruff check .` clean, `mypy --strict sidecar/ ml/` clean on 47 files, `pnpm -C shell lint` clean, `pnpm -C shell build` clean (**590 kB JS / 180 kB gzipped** — up from 581/178 with the sentiment chip + News page tabs + SentimentSummaryPanel + SentimentTimelineChart). VADER smoke: "Tragic accident kills many; devastating losses" → -0.7003, "absolutely amazing brilliant fantastic" → +0.7906.
+- **Verifications** (Phase A+B): `pytest` **366/366 green** (+38 over Session 005's 328), `ruff check .` clean, `mypy --strict sidecar/ ml/` clean on 47 files, `pnpm -C shell lint` clean, `pnpm -C shell build` clean (**590 kB JS / 180 kB gzipped** — up from 581/178 with the sentiment chip + News page tabs + SentimentSummaryPanel + SentimentTimelineChart). VADER smoke: "Tragic accident kills many; devastating losses" → -0.7003, "absolutely amazing brilliant fantastic" → +0.7906.
+
+**Phase C — Holt-Winters engine alongside SARIMAX** (richer-model spec gap closed without bundling cmdstanpy/Stan):
+
+- `ml/forecast.py` refactored from a single SARIMAX entry into a multi-engine dispatcher. Public `forecast_series(closes, *, horizon_days, engine="sarimax"|"holt_winters")` validates inputs once, then routes to `_forecast_sarimax` (unchanged behaviour) or `_forecast_holt_winters` via a small dict map. New `ForecastEngine` literal type alias, `ENGINES` tuple, `DEFAULT_ENGINE` constant, plus `SARIMAX_MODEL_NAME` / `HOLT_WINTERS_MODEL_NAME` strings persisted into `Forecast.model` so the chart caption can show "SARIMAX(1,1,1) · trained 2h ago" or "Holt-Winters (ETS A,A,N) · trained 2h ago" without re-deriving from config.
+- **Holt-Winters implementation**: `statsmodels.tsa.exponential_smoothing.ets.ETSModel` with `error="add", trend="add", seasonal=None, damped_trend=False`. ETS is the modern unified-framework version of Holt-Winters in statsmodels and is the only one with closed-form prediction intervals (`get_prediction().summary_frame(alpha=...)` returns `pi_lower`/`pi_upper`); the legacy `ExponentialSmoothing` class would force us into Monte-Carlo simulation. Two gotchas surfaced and fixed during implementation: (a) ETS requires a pandas Series with a DatetimeIndex (numpy arrays trip `'numpy.ndarray' object has no attribute 'index'`), and (b) once you pass an indexed Series, `predicted_mean[i]` becomes a label lookup not positional — `_materialise_points` had to switch to `iloc`-first access via a small helper.
+- `ml/jobs.py` — `train_one(symbol, *, engine=None)` and `train_forecasts(*, engine=None)` accept an optional engine; new `_resolve_engine(engine)` helper centralises the precedence chain (explicit arg > Settings value > `DEFAULT_ENGINE`). Lazy import of `sidecar.services.settings` inside the helper avoids a circular import.
+- `sidecar/api/forecast.py`:
+  - `GET /api/forecast/` adds an `engines: list[str]` field so the UI doesn't hard-code the literal set.
+  - `POST /api/forecast/{symbol}/retrain/?engine=...` accepts the engine query param. Unknown engine → 422 with a friendly "expected one of [...]" detail.
+  - **New `POST /api/forecast/retrain-all/?engine=...`** synchronous full-batch retrain. Returns `{requested, trained, skipped, engine}` so the Settings UI can show "Retrained N of M assets via SARIMAX". Uses the same `train_forecasts` job underneath, so per-asset failures are swallowed identically to the weekly cron.
+  - **New `DELETE /api/forecast/`** wipes every stored forecast. Returns `{deleted: N}`. Useful for "switch engines and start clean" — price history is untouched so the next retrain rebuilds from current daily closes.
+- New mutable setting `forecast.default_engine` (STRING type, allowed_values=("sarimax", "holt_winters"), default "sarimax"). Backed by a new `forecast_default_engine` env var. `SettingSpec.allowed_values` field added so the validator rejects unknown enum values with a friendly message; `SettingOut` exposes it to the UI so the Settings select renders typed options. **Total mutable settings now 17** (was 16).
+
+**Phase D — Settings-UI ML controls** (per ARCHITECTURE.md "ml/train.py runnable on demand from Settings UI"):
+
+- `sidecar/api/news.py` gains **`POST /api/news/score-now/`** — synchronous VADER backfill that returns `{scored: N}`. Lazy-imports `ml.jobs.score_articles` so a sidecar built without `requirements-ml.txt` returns 503 with a clear "install requirements-ml.txt" message instead of 500'ing.
+- `shell/src/pages/Settings.tsx`:
+  - **Engine selector**: the new `forecast.default_engine` setting renders as a typed `<select>` thanks to `SettingInput`'s new `allowed_values` branch (works for any future enum-string setting).
+  - **New "ML controls" section** above Runtime info, with three actions:
+    - **Retrain all forecasts** — calls `POST /api/forecast/retrain-all/`, surfaces `{trained}/{requested} via {engine}` plus a count of skipped assets when there's a gap.
+    - **Score unscored articles** — calls `POST /api/news/score-now/`, surfaces "Scored N articles" or "every headline already scored".
+    - **Clear forecasts** — opens the existing `ConfirmDialog` (NOT `window.confirm`, which is suppressed in the Tauri WKWebView) before calling `DELETE /api/forecast/`.
+  - Single-state-machine for the action panel: `busy: "retrain"|"score"|"clear"|null` plus `message: string|null` and `tone: "info"|"success"|"error"`.
+- `shell/src/api/client.ts`:
+  - New types: `ForecastEngine`, `RetrainAllResult`, `ClearForecastsResult`, `ScoreNowResult`. `SettingEntry.allowed_values: string[]|null`. `ForecastAvailability.engines: string[]`.
+  - New helpers: `retrainAllForecasts({engine?})`, `clearAllForecasts()`, `scoreArticlesNow()`. `retrainForecast(symbol, {engine?})` accepts an optional engine query param.
+  - `apiJson` extended to handle DELETE so `clearAllForecasts` can return its `{deleted}` payload through the same JSON helper as POST/PUT.
+- `shell/src/pages/AssetDetail.tsx` — copy tweaks to the ForecastCaption error / not-trained states so they're engine-agnostic ("the daily-bar job needs to run for a while before the forecaster can fit" instead of mentioning SARIMAX directly). Engine selection lives in Settings — the per-asset retrain just defers to the configured default.
+
+**Tests added (16 new in this phase, total 382 from 366):**
+- `test_ml_forecast.py` (+5): default engine is SARIMAX, Holt-Winters fits and emits horizon-many points, HW CI bands ordered (95% ⊇ 80% ⊇ point), unknown engine raises `ForecastError`, `ENGINES` literal set is stable.
+- `test_api_forecast.py` (+8): retrain default → SARIMAX, retrain `?engine=holt_winters` → "Holt-Winters" model, unknown engine → 422, availability includes engines list, retrain-all returns counts (with skipped tracking), retrain-all engine override persists, retrain-all with no eligible assets returns zeros, clear-all wipes persisted + leaves eligible alone, clear-all with no rows returns zero.
+- `test_api_news.py` (+2): score-now backfills + returns count, score-now with empty corpus returns zero.
+- Test counts in `test_api_config.py` / `test_settings_service.py` / `test_scheduler_reconfigure.py` bumped from 16 → 17 keys.
+
+**Verifications (Phase C+D)**: `pytest` **382/382 green** (+16 over Phase A+B's 366), `ruff check .` clean, `mypy --strict sidecar/ ml/` clean on 47 files, `pnpm -C shell lint` clean, `pnpm -C shell build` clean (**596 kB JS / 181 kB gzipped** — up from 590/180 with the Settings ML controls panel + ConfirmDialog wiring + engine selector).
 
 ### What was just completed (checkpoint 24 — bundle pipeline hardened + branch audit verified)
 User flagged two follow-ups after the v0.2.0 rebase: (a) re-audit the remaining branches now that `git log --cherry-mark` could be run against reconciled main, and (b) fix the silent-bundle-of-stale-sidecar footgun that surfaced when the freshly-rebuilt `.app` was reporting v0.2.0 but `/api/assets/search/` returned 404 because Tauri had bundled a sidecar from before the search route landed.

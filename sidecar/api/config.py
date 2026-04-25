@@ -31,6 +31,10 @@ class SettingOut(BaseModel):
     min: int | None = None
     max: int | None = None
     has_value: bool
+    # When set, the UI renders a dropdown rather than a free-form text
+    # input. None for non-enumerated STRING settings (and for every BOOL
+    # / INT / SECRET — those have their own input shapes).
+    allowed_values: list[str] | None = None
 
 
 class ReadonlyConfigOut(BaseModel):
@@ -72,6 +76,11 @@ def _build_response() -> ConfigOut:
                 min=spec.min,
                 max=spec.max,
                 has_value=has_value,
+                allowed_values=(
+                    list(spec.allowed_values)
+                    if spec.allowed_values is not None
+                    else None
+                ),
             )
         )
 

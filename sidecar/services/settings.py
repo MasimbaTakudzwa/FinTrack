@@ -51,6 +51,11 @@ class SettingSpec:
     description: str = ""
     min: int | None = None
     max: int | None = None
+    # Optional enumeration of valid values for STRING-typed settings.
+    # When set, ``validate_and_serialize`` rejects anything outside the list
+    # with a 422 from the API layer. Used by `forecast.default_engine` to
+    # constrain the model selector to the engines we actually support.
+    allowed_values: tuple[str, ...] | None = None
 
     @property
     def env_name(self) -> str | None:
@@ -233,6 +238,21 @@ SETTINGS_SPECS: tuple[SettingSpec, ...] = (
         max=1440,
     ),
     SettingSpec(
+        key="forecast.default_engine",
+        type=SettingType.STRING,
+        env_attr="forecast_default_engine",
+        default="sarimax",
+        allowed_values=("sarimax", "holt_winters"),
+        label="Forecast engine",
+        description=(
+            "Which model fits new forecasts when the user clicks "
+            "“Retrain” without an explicit engine choice. SARIMAX "
+            "is a strong default for short-term price drift; Holt-Winters "
+            "(ETS) tracks slow trends with tighter bands when the series "
+            "is mostly trend + noise."
+        ),
+    ),
+    SettingSpec(
         key="fred_api_key",
         type=SettingType.SECRET,
         env_attr="fred_api_key",
@@ -320,6 +340,15 @@ def validate_and_serialize(key: str, raw_value: Any) -> str:
     # STRING / SECRET
     if not isinstance(raw_value, str):
         raise ValueError(f"{key}: expected string")
+    if (
+        spec.type == SettingType.STRING
+        and spec.allowed_values is not None
+        and raw_value not in spec.allowed_values
+    ):
+        raise ValueError(
+            f"{key}: must be one of {sorted(spec.allowed_values)}, "
+            f"got {raw_value!r}"
+        )
     return raw_value
 
 

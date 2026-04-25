@@ -402,3 +402,33 @@ def test_sentiment_timeseries_days_validation(isolated_db: Path) -> None:
         assert client.get(
             "/api/news/sentiment-timeseries/AAPL/", params={"days": 999}
         ).status_code == 422
+
+
+def test_score_now_runs_backfill_and_returns_count(isolated_db: Path) -> None:
+    """Settings → ML controls "Score articles now" button kicks the backfill
+    synchronously and reports how many rows it scored."""
+    with session_scope() as s:
+        article = Article(
+            url="https://t/x",
+            headline="Outstanding earnings beat",
+            source="Yahoo Finance",
+            published_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            sentiment=None,
+        )
+        s.add(article)
+
+    with TestClient(app) as client:
+        resp = client.post("/api/news/score-now/")
+        assert resp.status_code == 200
+        assert resp.json()["scored"] == 1
+
+    with session_scope() as s:
+        row = s.execute(select(Article)).scalar_one()
+        assert row.sentiment is not None
+
+
+def test_score_now_with_no_unscored_returns_zero(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.post("/api/news/score-now/")
+        assert resp.status_code == 200
+        assert resp.json()["scored"] == 0

@@ -69,19 +69,24 @@ async function apiPost<T, B>(
 }
 
 async function apiJson<T, B>(
-  method: "POST" | "PUT",
+  method: "POST" | "PUT" | "DELETE",
   path: string,
   body: B,
   opts: { signal?: AbortSignal },
 ): Promise<T> {
   const base = await getBaseUrl();
   const url = `${base}${path}`;
-  const res = await fetch(url, {
+  // DELETE goes without a JSON body — typical REST convention. POST/PUT
+  // send the JSON payload as-is.
+  const init: RequestInit = {
     method,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
     signal: opts.signal,
-  });
+  };
+  if (method !== "DELETE") {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(url, init);
   if (!res.ok) {
     throw new ApiError(res.status, url, `${method} ${path} → ${await _detail(res, method, path)}`);
   }
@@ -448,6 +453,9 @@ export interface SettingEntry {
   max: number | null;
   /** For secrets: whether any value is set (env or db). Always true otherwise. */
   has_value: boolean;
+  /** When set, the UI renders this as a select with these literal options
+   *  instead of a free-form input. STRING-typed settings only. */
+  allowed_values: string[] | null;
 }
 
 export interface ReadonlyConfig {
@@ -690,6 +698,10 @@ export function markAlertNotified(
 
 // ---------- Forecast ----------
 
+/** Server-supported engines. Stays as a literal union here so the UI can
+ *  present a typed selector without doing its own validation. */
+export type ForecastEngine = "sarimax" | "holt_winters";
+
 export interface ForecastPoint {
   forecast_date: string; // YYYY-MM-DD
   yhat: number;
@@ -714,6 +726,24 @@ export interface Forecast {
 export interface ForecastAvailability {
   eligible: string[];
   persisted: string[];
+  /** Canonical list of engines the backend will accept (empty until the
+   *  endpoint is reached at least once on a fresh install). */
+  engines: string[];
+}
+
+export interface RetrainAllResult {
+  requested: number;
+  trained: number;
+  skipped: number;
+  engine: string;
+}
+
+export interface ClearForecastsResult {
+  deleted: number;
+}
+
+export interface ScoreNowResult {
+  scored: number;
 }
 
 export function listForecastAvailability(
@@ -733,10 +763,45 @@ export function getForecast(
 
 export function retrainForecast(
   symbol: string,
-  signal?: AbortSignal,
+  opts: { engine?: ForecastEngine | null; signal?: AbortSignal } = {},
 ): Promise<Forecast> {
+  const qs = opts.engine ? `?engine=${encodeURIComponent(opts.engine)}` : "";
   return apiPost<Forecast, Record<string, never>>(
-    `/api/forecast/${encodeURIComponent(symbol)}/retrain/`,
+    `/api/forecast/${encodeURIComponent(symbol)}/retrain/${qs}`,
+    {},
+    { signal: opts.signal },
+  );
+}
+
+export function retrainAllForecasts(
+  opts: { engine?: ForecastEngine | null; signal?: AbortSignal } = {},
+): Promise<RetrainAllResult> {
+  const qs = opts.engine ? `?engine=${encodeURIComponent(opts.engine)}` : "";
+  return apiPost<RetrainAllResult, Record<string, never>>(
+    `/api/forecast/retrain-all/${qs}`,
+    {},
+    { signal: opts.signal },
+  );
+}
+
+export function clearAllForecasts(
+  signal?: AbortSignal,
+): Promise<ClearForecastsResult> {
+  // The endpoint returns a JSON body (`{deleted: N}`) so we route through
+  // the JSON helper rather than the void-returning `apiDelete`.
+  return apiJson<ClearForecastsResult, Record<string, never>>(
+    "DELETE",
+    "/api/forecast/",
+    {},
+    { signal },
+  );
+}
+
+export function scoreArticlesNow(
+  signal?: AbortSignal,
+): Promise<ScoreNowResult> {
+  return apiPost<ScoreNowResult, Record<string, never>>(
+    "/api/news/score-now/",
     {},
     { signal },
   );
