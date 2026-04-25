@@ -113,6 +113,29 @@ User pivoted: "stop thinking about shipping small patches and functionality. I r
 
 **Verifications (Phase E)**: `pytest` **406/406 green** (+24 over Phase D's 382), `ruff check .` clean, `mypy --strict sidecar/ ml/` clean on 49 files, `pnpm -C shell lint` clean, `pnpm -C shell build` clean (**601 kB JS / 182 kB gzipped** — up from 596/181 with ForecastAccuracyPanel + new client helpers).
 
+**Phase F — Asset correlation analytics** (post-spec, market-intel feature):
+
+- New `ml/correlation.py` (~200 LOC) — pure-compute pairwise Pearson correlation on daily log-returns:
+  - `_log_returns(closes)` converts a sorted `(date, close)` series into a `date → log-return` map; first day skipped (no prior close), non-positive prices guarded against ``log(<=0)``.
+  - `_pearson(xs, ys)` returns r ∈ [-1, +1]; zero-variance series → 0.0 (avoids NaN; UI treats 0 as "no signal").
+  - `_aligned_returns(a, b)` intersects two return-maps on dates so the correlation only sees days both assets had data.
+  - `compute_correlation_matrix(symbols, lookback_days=N)` orchestrates: dedup/uppercase/order symbols, resolve each to an `asset_id`, pull daily closes within the window, compute returns, walk pairs (upper-triangle + diagonal), emit `CorrelationCell(symbol_a, symbol_b, coefficient, overlap)`. Diagonals are 1.0 by convention; cells with `overlap < MIN_OVERLAP_DAYS = 30` are still emitted (UI fades them) so the matrix stays a square.
+- New `sidecar/api/analytics.py` router:
+  - `GET /api/analytics/correlations/?symbols=A,B,C&lookback_days=N` (comma-separated symbol list, 422 on empty, 7 ≤ days ≤ 730). Permissive on unknown symbols — silently dropped during construction so the UI sees a smaller-than-requested matrix when the user types a typo rather than an error.
+  - `GET /api/analytics/correlations/default-watchlist/?lookback_days=N` — convenience wrapper that resolves the user's default watchlist and pipes its assets through the same engine. 404 when no default watchlist exists; UI falls back to the explicit-symbols path with `listAssets()`.
+  - Wired into `sidecar/main.py` via `app.include_router(analytics_router)`.
+- New `shell/src/components/CorrelationHeatmap.tsx` (~300 LOC) — square heatmap on the Market overview page:
+  - 30d / 90d / 180d / 1y lookback toggle.
+  - Diverging color scale: rose for negative r, neutral grey at zero, emerald for positive r. Alpha scales with |r| so cell intensity reads as confidence at a glance. Cells below `min_overlap_days` (returned by the API so the UI doesn't hard-code the threshold) shift to a muted zinc.
+  - Tries the default-watchlist endpoint first; on 404 falls back to "every active asset" via `listAssets() + getCorrelations()`. Empty-state copy when no assets are tracked yet.
+  - Server emits the upper triangle + diagonal only; the component mirrors when rendering the lower half.
+- `shell/src/api/client.ts` additions: `CorrelationCell`, `CorrelationMatrix` types; `getCorrelations({symbols, lookbackDays})`, `getDefaultWatchlistCorrelations({lookbackDays})` helpers.
+- **Tests** (33 new, total **430**):
+  - `test_ml_correlation.py` (15): log_returns drops first day + skips non-positive prices, Pearson on perfect-positive / perfect-negative / zero-variance / too-short, aligned_returns intersects, compute_correlation_matrix on empty / single-asset-diagonal / perfect-correlation / anti-correlated / dedup-and-normalize / unknown-symbol-dropped / lookback-window respect, MIN_OVERLAP_DAYS sanity bounds.
+  - `test_api_analytics.py` (9): explicit-symbols matrix happy path, whitespace+case handling, unknown-symbols dropped, empty-symbols 422, only-commas 422, lookback bounds 422 below + above, default-watchlist endpoint happy + 404-when-no-default + lookback validation.
+
+**Verifications (Phase F)**: `pytest` **430/430 green** (+24 over Phase E's 406), `ruff check .` clean, `mypy --strict sidecar/ ml/` clean on 51 files, `pnpm -C shell lint` clean, `pnpm -C shell build` clean (**607 kB JS / 184 kB gzipped** — up from 601/182 with the heatmap + lookback picker).
+
 ### What was just completed (checkpoint 24 — bundle pipeline hardened + branch audit verified)
 User flagged two follow-ups after the v0.2.0 rebase: (a) re-audit the remaining branches now that `git log --cherry-mark` could be run against reconciled main, and (b) fix the silent-bundle-of-stale-sidecar footgun that surfaced when the freshly-rebuilt `.app` was reporting v0.2.0 but `/api/assets/search/` returned 404 because Tauri had bundled a sidecar from before the search route landed.
 

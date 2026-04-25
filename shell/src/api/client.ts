@@ -809,6 +809,55 @@ export function getForecastAccuracy(
   );
 }
 
+// ---------- Analytics ----------
+
+export interface CorrelationCell {
+  symbol_a: string;
+  symbol_b: string;
+  /** Pearson r in [-1, +1]. */
+  coefficient: number;
+  /** Number of overlapping return-days backing the correlation. */
+  overlap: number;
+}
+
+export interface CorrelationMatrix {
+  symbols: string[];
+  lookback_days: number;
+  asset_count: number;
+  /** Server's own MIN_OVERLAP_DAYS threshold — UI fades cells below this. */
+  min_overlap_days: number;
+  /** Upper triangle + diagonal. UI mirrors when rendering the lower half. */
+  cells: CorrelationCell[];
+}
+
+export function getCorrelations(
+  opts: {
+    symbols: string[];
+    lookbackDays?: number;
+    signal?: AbortSignal;
+  },
+): Promise<CorrelationMatrix> {
+  return apiGet<CorrelationMatrix>("/api/analytics/correlations/", {
+    params: {
+      symbols: opts.symbols.join(","),
+      lookback_days: opts.lookbackDays ?? 90,
+    },
+    signal: opts.signal,
+  });
+}
+
+export function getDefaultWatchlistCorrelations(
+  opts: { lookbackDays?: number; signal?: AbortSignal } = {},
+): Promise<CorrelationMatrix> {
+  return apiGet<CorrelationMatrix>(
+    "/api/analytics/correlations/default-watchlist/",
+    {
+      params: { lookback_days: opts.lookbackDays ?? 90 },
+      signal: opts.signal,
+    },
+  );
+}
+
 export function retrainAllForecasts(
   opts: { engine?: ForecastEngine | null; signal?: AbortSignal } = {},
 ): Promise<RetrainAllResult> {

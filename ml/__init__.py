@@ -29,4 +29,11 @@ still boots and serves everything else.
 
 from __future__ import annotations
 
-__all__ = ["accuracy", "forecast", "jobs", "persistence", "sentiment"]
+__all__ = [
+    "accuracy",
+    "correlation",
+    "forecast",
+    "jobs",
+    "persistence",
+    "sentiment",
+]
