@@ -324,6 +324,8 @@ export function getMacroSeries(
 
 // ---------- News ----------
 
+export type SentimentBucket = "positive" | "neutral" | "negative";
+
 export interface Article {
   id: number;
   url: string;
@@ -331,6 +333,8 @@ export interface Article {
   source: string;
   published_at: string; // ISO 8601 — treat as UTC
   summary: string | null;
+  /** VADER compound score in [-1, +1]; null = not yet scored. */
+  sentiment: number | null;
   symbols: string[];
 }
 
@@ -339,11 +343,25 @@ export interface ArticleList {
   articles: Article[];
 }
 
+export interface SentimentSummary {
+  symbol: string;
+  days: number;
+  total: number;
+  scored: number;
+  unscored: number;
+  positive: number;
+  neutral: number;
+  negative: number;
+  /** Average compound score across scored articles in window; null if none. */
+  mean: number | null;
+}
+
 export function listNews(
   opts: {
     symbol?: string;
     from?: string;
     to?: string;
+    sentiment?: SentimentBucket;
     limit?: number;
     signal?: AbortSignal;
   } = {},
@@ -353,10 +371,62 @@ export function listNews(
       symbol: opts.symbol,
       from: opts.from,
       to: opts.to,
+      sentiment: opts.sentiment,
       limit: opts.limit,
     },
     signal: opts.signal,
   });
+}
+
+export function getSentimentSummary(
+  symbol: string,
+  opts: { days?: number; signal?: AbortSignal } = {},
+): Promise<SentimentSummary> {
+  return apiGet<SentimentSummary>(
+    `/api/news/sentiment-summary/${encodeURIComponent(symbol)}/`,
+    {
+      params: { days: opts.days ?? 7 },
+      signal: opts.signal,
+    },
+  );
+}
+
+export interface SentimentTimeseriesPoint {
+  date: string; // YYYY-MM-DD UTC
+  mean: number;
+  count: number;
+}
+
+export interface SentimentTimeseries {
+  symbol: string;
+  days: number;
+  points: SentimentTimeseriesPoint[];
+}
+
+/** Daily-bucketed mean compound score for one asset; powers the
+ *  "sentiment vs price" overlay on AssetDetail. */
+export function getSentimentTimeseries(
+  symbol: string,
+  opts: { days?: number; signal?: AbortSignal } = {},
+): Promise<SentimentTimeseries> {
+  return apiGet<SentimentTimeseries>(
+    `/api/news/sentiment-timeseries/${encodeURIComponent(symbol)}/`,
+    {
+      params: { days: opts.days ?? 30 },
+      signal: opts.signal,
+    },
+  );
+}
+
+/** VADER-conventional thresholds — match `ml.sentiment` constants. */
+export const SENTIMENT_POSITIVE_THRESHOLD = 0.05;
+export const SENTIMENT_NEGATIVE_THRESHOLD = -0.05;
+
+export function classifySentiment(score: number | null): SentimentBucket {
+  if (score === null) return "neutral";
+  if (score >= SENTIMENT_POSITIVE_THRESHOLD) return "positive";
+  if (score <= SENTIMENT_NEGATIVE_THRESHOLD) return "negative";
+  return "neutral";
 }
 
 // ---------- Config / runtime settings ----------

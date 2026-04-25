@@ -154,4 +154,4 @@ def test_validate_and_serialize_bool_accepts_strings() -> None:
 
 
 def test_all_specs_have_unique_keys() -> None:
-    assert len(SPECS_BY_KEY) == 14, "spec list drifted — update assertions"
+    assert len(SPECS_BY_KEY) == 16, "spec list drifted — update assertions"

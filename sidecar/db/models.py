@@ -9,6 +9,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Numeric,
@@ -147,6 +148,12 @@ class Article(Base):
         DateTime(timezone=True), index=True
     )
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # VADER compound score in [-1.0, +1.0]. Nullable means "not yet scored" —
+    # set by `ingest_news` inline on insert and by the `score_articles`
+    # backfill job for historical rows imported before sentiment was wired.
+    sentiment: Mapped[float | None] = mapped_column(
+        Float, nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

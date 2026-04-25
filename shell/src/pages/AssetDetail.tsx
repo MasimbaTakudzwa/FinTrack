@@ -34,6 +34,7 @@ import {
 import { AlertCreateModal } from "../components/AlertCreateModal";
 import { CandleChart } from "../components/CandleChart";
 import { NewsList } from "../components/NewsList";
+import { SentimentSummaryPanel } from "../components/SentimentSummaryPanel";
 import { useResolvedTheme } from "../stores/useSettings";
 
 interface State {
@@ -539,6 +540,7 @@ function AssetBody({
         </div>
 
         <aside className="flex flex-col gap-4">
+          <SentimentSummaryPanel key={`sentiment-${asset.symbol}`} symbol={asset.symbol} />
           <NewsPanel key={asset.symbol} symbol={asset.symbol} />
         </aside>
       </div>

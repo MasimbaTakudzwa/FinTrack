@@ -262,7 +262,10 @@ def ingest_news() -> int:
     """Fetch Yahoo Finance RSS news for every active asset.
 
     Articles are dedup'd by URL across assets — the same headline mentioning
-    multiple symbols is stored once and linked to each matched asset.
+    multiple symbols is stored once and linked to each matched asset. After
+    upserting, every article that came back without a sentiment score yet is
+    fed through VADER inline so the user sees scored headlines immediately
+    rather than waiting for the next periodic backfill tick.
 
     Returns the number of newly inserted article_asset association rows (which
     is close to, but not exactly, "new articles" — an existing article linking
@@ -290,13 +293,45 @@ def ingest_news() -> int:
         linked = _upsert_article_assets(
             session, items, url_to_article_id, symbol_to_id
         )
-        logger.info(
-            "ingest_news: linked %d new (article,asset) pairs from %d items across %d symbols",
-            linked,
-            len(items),
-            len(symbol_to_id),
-        )
-        return linked
+        # Identify which of the upserted articles are still unscored so we
+        # don't re-score the existing-and-already-rated ones. This also
+        # naturally narrows scoring to the brand-new inserts on a steady-
+        # state run when most URLs were already in the DB.
+        article_ids = list({aid for aid in url_to_article_id.values()})
+        unscored_ids = [
+            aid for (aid,) in session.execute(
+                select(Article.id).where(
+                    Article.id.in_(article_ids),
+                    Article.sentiment.is_(None),
+                )
+            ).all()
+        ]
+
+    # Score outside the upsert transaction so a slow VADER load doesn't
+    # extend the write lock — and we tolerate a missing ML backend cleanly.
+    if unscored_ids:
+        try:
+            from ml.jobs import score_article_ids
+
+            scored = score_article_ids(unscored_ids)
+            if scored:
+                logger.info(
+                    "ingest_news: scored %d new headlines via VADER", scored
+                )
+        except ImportError as exc:
+            logger.info(
+                "ingest_news: ml package unavailable (%s) — skipping inline "
+                "sentiment scoring",
+                exc,
+            )
+
+    logger.info(
+        "ingest_news: linked %d new (article,asset) pairs from %d items across %d symbols",
+        linked,
+        len(items),
+        len(symbol_to_id),
+    )
+    return linked
 
 
 def ingest_macro() -> int:
@@ -402,4 +437,32 @@ def train_forecasts_job() -> int:
         return 0
     except Exception:  # pragma: no cover — defensive
         logger.exception("train_forecasts_job failed")
+        return 0
+
+
+def score_news_sentiment_job() -> int:
+    """Scheduler entry for the periodic VADER sentiment backfill.
+
+    Picks up any ``Article`` rows that don't yet have a sentiment score
+    (typically only historical rows imported before sentiment was wired,
+    or rows the inline-scoring step in ``ingest_news`` skipped due to a
+    transient backend issue). The new-article hot path stays inside
+    ``ingest_news`` so users don't wait on this scheduler tick.
+
+    Lazy import of ``ml.jobs`` so a sidecar without ``requirements-ml.txt``
+    still boots cleanly. Returns count of articles newly scored.
+    """
+    try:
+        from ml.jobs import score_articles
+
+        return score_articles()
+    except ImportError as exc:
+        logger.info(
+            "score_news_sentiment_job: ml package unavailable (%s) — "
+            "install requirements-ml.txt to enable sentiment scoring",
+            exc,
+        )
+        return 0
+    except Exception:  # pragma: no cover — defensive
+        logger.exception("score_news_sentiment_job failed")
         return 0

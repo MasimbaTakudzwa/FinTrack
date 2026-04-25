@@ -67,6 +67,9 @@ datas: list[tuple[str, str]] = [
 # - numpy's F2PY runtime shims live alongside its code.
 # - pandas ships a timezone database clone + SQL dialect hooks.
 # - patsy (statsmodels' formula engine) keeps builtin transforms under data.
+# - vaderSentiment ships its lexicon (``vader_lexicon.txt``, ~30 KB) and a
+#   small emoji-utf8 mapping under ``vaderSentiment/`` — without these, the
+#   analyzer raises FileNotFoundError on first construction.
 for pkg in (
     "yfinance",
     "feedparser",
@@ -76,6 +79,7 @@ for pkg in (
     "numpy",
     "pandas",
     "patsy",
+    "vaderSentiment",
 ):
     try:
         datas.extend(collect_data_files(pkg))
@@ -120,6 +124,11 @@ hiddenimports += collect_submodules("numpy")
 hiddenimports += collect_submodules("pandas")
 hiddenimports += collect_submodules("patsy")
 
+# vaderSentiment is lazy-imported inside ``ml.sentiment._get_analyzer`` so
+# PyInstaller's static AST traversal misses it; pin both submodules so the
+# frozen sidecar can score headlines.
+hiddenimports += collect_submodules("vaderSentiment")
+
 # Our own models module — env.py references it via ``from sidecar.db import models``
 # inside a function scope that PyInstaller may or may not trace. Explicit
 # include keeps migrations reliable. The ml.* modules likewise get lazy-
@@ -132,6 +141,7 @@ hiddenimports += [
     "ml.forecast",
     "ml.jobs",
     "ml.persistence",
+    "ml.sentiment",
 ]
 
 # ---------------------------------------------------------------------------

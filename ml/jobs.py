@@ -1,6 +1,6 @@
-"""Orchestration layer for the forecasting engine.
+"""Orchestration layer for the forecasting and sentiment engines.
 
-Two public entry points:
+Forecasting entry points:
 - ``train_forecasts()`` — scheduler job. Iterates every active asset, pulls
   its daily-close history from `price_points` WHERE ``interval="1d"``, fits
   SARIMAX, persists the result. Swallows per-asset errors so one bad series
@@ -9,10 +9,17 @@ Two public entry points:
   so the API layer can surface the error (distinguish InsufficientData from
   Fit failures from Unknown symbol).
 
+Sentiment entry points:
+- ``score_articles(batch_size=...)`` — scheduler job. Picks up unscored
+  articles in batches, runs them through VADER, persists. Idempotent (only
+  touches rows where ``sentiment IS NULL``).
+- ``score_article_ids(ids)`` — used by ``ingest_news`` to score the small
+  batch of articles it just inserted, before the scheduler's next tick.
+
 Design notes:
-- We consume `price_points` directly rather than going through the API layer
-  — we're in the same process, SQLAlchemy is already here, and the API would
-  add a round-trip through FastAPI's TestClient-style plumbing for no gain.
+- We consume `price_points` and `articles` directly rather than going
+  through the API layer — we're in the same process, SQLAlchemy is already
+  here, and an HTTP round-trip would buy nothing.
 - Horizon is fixed at 14 days (project default, user-visible in Settings as
   a future toggle). Persisted on each row so future retrains can change it
   without a migration.
@@ -26,7 +33,7 @@ import logging
 from collections.abc import Sequence
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ml.forecast import (
@@ -37,13 +44,15 @@ from ml.forecast import (
     forecast_series,
 )
 from ml.persistence import save_forecast
+from ml.sentiment import SentimentBackendError, score_many
 from sidecar.db.engine import session_scope
-from sidecar.db.models import Asset, PricePoint
+from sidecar.db.models import Article, Asset, PricePoint
 
 logger = logging.getLogger(__name__)
 
 
 DEFAULT_HORIZON_DAYS = 14
+DEFAULT_SENTIMENT_BATCH_SIZE = 200
 
 
 class UnknownSymbolError(ForecastError):
@@ -198,3 +207,101 @@ def symbols_eligible_for_forecast() -> Sequence[str]:
             .order_by(Asset.symbol.asc())
         ).scalars().all()
     return list(rows)
+
+
+# ---------------------------------------------------------------------------
+# Sentiment
+# ---------------------------------------------------------------------------
+
+
+def _score_and_persist(
+    session: Session, ids: Sequence[int], headlines: Sequence[str]
+) -> int:
+    """Run VADER over `headlines`, write each score back to its article row.
+
+    Returns the number of rows updated. Caller controls the surrounding
+    session/transaction.
+    """
+    if not ids:
+        return 0
+    scores = score_many(headlines)
+    for article_id, score in zip(ids, scores, strict=True):
+        session.execute(
+            update(Article)
+            .where(Article.id == article_id)
+            .values(sentiment=score)
+        )
+    return len(ids)
+
+
+def score_article_ids(ids: Sequence[int]) -> int:
+    """Score a specific list of article IDs in a single batch.
+
+    Called by ``ingest_news`` immediately after the upsert so freshly-pulled
+    headlines arrive with sentiment already populated — the user never sees
+    a "loading" placeholder for new articles.
+
+    Skips silently when VADER isn't installed (returns 0). Errors during
+    scoring are logged and non-fatal — leaving ``sentiment IS NULL`` lets
+    the periodic ``score_articles`` job pick the row up later.
+    """
+    if not ids:
+        return 0
+    try:
+        with session_scope() as session:
+            rows = session.execute(
+                select(Article.id, Article.headline).where(Article.id.in_(ids))
+            ).all()
+            if not rows:
+                return 0
+            id_list = [row[0] for row in rows]
+            headlines = [row[1] for row in rows]
+            return _score_and_persist(session, id_list, headlines)
+    except SentimentBackendError as exc:
+        logger.warning(
+            "score_article_ids: VADER backend unavailable (%s); leaving "
+            "%d articles unscored",
+            exc,
+            len(ids),
+        )
+        return 0
+
+
+def score_articles(batch_size: int = DEFAULT_SENTIMENT_BATCH_SIZE) -> int:
+    """Score every article that doesn't yet have a sentiment value.
+
+    Idempotent: re-running picks up any new ``sentiment IS NULL`` rows that
+    may have been inserted by direct DB writes (tests, manual SQL, etc.).
+    Done in batches so a single transaction doesn't lock the whole table for
+    seconds at a time on a large backfill.
+
+    Returns the total number of articles scored across all batches.
+    """
+    total = 0
+    while True:
+        try:
+            with session_scope() as session:
+                rows = session.execute(
+                    select(Article.id, Article.headline)
+                    .where(Article.sentiment.is_(None))
+                    .order_by(Article.id.asc())
+                    .limit(batch_size)
+                ).all()
+                if not rows:
+                    break
+                ids = [row[0] for row in rows]
+                headlines = [row[1] for row in rows]
+                total += _score_and_persist(session, ids, headlines)
+                if len(rows) < batch_size:
+                    break
+        except SentimentBackendError as exc:
+            logger.error(
+                "score_articles: VADER backend unavailable (%s); aborting "
+                "after scoring %d articles in this run",
+                exc,
+                total,
+            )
+            return total
+    if total:
+        logger.info("score_articles: scored %d previously-unscored articles", total)
+    return total

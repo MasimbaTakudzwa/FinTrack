@@ -207,6 +207,32 @@ SETTINGS_SPECS: tuple[SettingSpec, ...] = (
         max=60,
     ),
     SettingSpec(
+        key="score_news_sentiment.enabled",
+        type=SettingType.BOOL,
+        env_attr="enable_sentiment_job",
+        default=True,
+        label="Enable news sentiment scoring",
+        description=(
+            "Run VADER over every news headline as it lands and on a periodic "
+            "backfill for any rows missed by the inline pass. Disable to stop "
+            "scoring entirely (existing scores are preserved)."
+        ),
+    ),
+    SettingSpec(
+        key="score_news_sentiment.interval_minutes",
+        type=SettingType.INT,
+        env_attr="score_news_sentiment_interval_minutes",
+        default=60,
+        label="Sentiment backfill interval (minutes)",
+        description=(
+            "How often the catch-up job scans for unscored articles. The "
+            "main scoring path is inline with news ingest, so this is a "
+            "safety net rather than the hot path."
+        ),
+        min=1,
+        max=1440,
+    ),
+    SettingSpec(
         key="fred_api_key",
         type=SettingType.SECRET,
         env_attr="fred_api_key",

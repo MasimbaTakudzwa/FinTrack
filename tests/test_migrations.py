@@ -380,6 +380,37 @@ def test_upgrade_to_head_creates_forecasts_table(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_upgrade_to_head_adds_sentiment_to_articles(tmp_path: Path) -> None:
+    """0010 adds a nullable `sentiment` Float column to `articles` plus an
+    index on it (used by the News page sentiment filter and the asset
+    sentiment-summary endpoint).
+    """
+    db_file = tmp_path / "test.db"
+    upgrade_to_head(db_path=str(db_file))
+
+    conn = sqlite3.connect(db_file)
+    try:
+        cols = {
+            r[1]: r for r in conn.execute("PRAGMA table_info(articles)").fetchall()
+        }
+        assert "sentiment" in cols, "sentiment column not added to articles"
+
+        # nullable=True
+        sentiment_col = cols["sentiment"]
+        # PRAGMA table_info row: (cid, name, type, notnull, dflt_value, pk)
+        assert sentiment_col[3] == 0, "sentiment must be nullable"
+        assert sentiment_col[2].upper() in ("FLOAT", "REAL"), (
+            f"unexpected sentiment column type: {sentiment_col[2]}"
+        )
+
+        indexes = {
+            r[1] for r in conn.execute("PRAGMA index_list(articles)").fetchall()
+        }
+        assert "ix_articles_sentiment" in indexes
+    finally:
+        conn.close()
+
+
 def test_upgrade_to_head_creates_macro_tables(tmp_path: Path) -> None:
     db_file = tmp_path / "test.db"
     upgrade_to_head(db_path=str(db_file))

@@ -48,6 +48,8 @@ DEFAULT_CONFIG = {
     "fred_api_key": "",
     "check_alerts.enabled": True,
     "check_alerts.interval_minutes": 1,
+    "score_news_sentiment.enabled": True,
+    "score_news_sentiment.interval_minutes": 60,
 }
 
 

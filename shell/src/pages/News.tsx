@@ -4,6 +4,7 @@ import { Newspaper, RefreshCw } from "lucide-react";
 import {
   type Article,
   type Asset,
+  type SentimentBucket,
   listAssets,
   listNews,
 } from "../api/client";
@@ -11,6 +12,13 @@ import { NewsList } from "../components/NewsList";
 
 const ALL = "__all__";
 const PAGE_LIMIT = 100;
+
+const SENTIMENT_BUCKETS: { key: SentimentBucket | "all"; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "positive", label: "Positive" },
+  { key: "neutral", label: "Neutral" },
+  { key: "negative", label: "Negative" },
+];
 
 interface State {
   articles: Article[];
@@ -29,6 +37,7 @@ const INITIAL: State = {
 export function News() {
   const [searchParams, setSearchParams] = useSearchParams();
   const urlSymbol = searchParams.get("symbol")?.toUpperCase() ?? null;
+  const urlSentiment = parseSentimentParam(searchParams.get("sentiment"));
   const [state, setState] = useState<State>(INITIAL);
   const [tick, setTick] = useState(0);
 
@@ -43,6 +52,7 @@ export function News() {
           listAssets({ activeOnly: false, signal: controller.signal }),
           listNews({
             symbol: urlSymbol ?? undefined,
+            sentiment: urlSentiment ?? undefined,
             limit: PAGE_LIMIT,
             signal: controller.signal,
           }),
@@ -68,7 +78,7 @@ export function News() {
       cancelled = true;
       controller.abort();
     };
-  }, [urlSymbol, tick]);
+  }, [urlSymbol, urlSentiment, tick]);
 
   const onFilterChange = (value: string) => {
     const next = new URLSearchParams(searchParams);
@@ -80,6 +90,17 @@ export function News() {
     setSearchParams(next);
     // Reset loading here (event handler, NOT inside useEffect) so the user
     // sees a spinner while the new filter's articles are fetched.
+    setState((s) => ({ ...s, loading: true, error: null }));
+  };
+
+  const onSentimentChange = (bucket: SentimentBucket | "all") => {
+    const next = new URLSearchParams(searchParams);
+    if (bucket === "all") {
+      next.delete("sentiment");
+    } else {
+      next.set("sentiment", bucket);
+    }
+    setSearchParams(next);
     setState((s) => ({ ...s, loading: true, error: null }));
   };
 
@@ -108,10 +129,16 @@ export function News() {
               ? "Loading…"
               : `${state.articles.length} article${state.articles.length === 1 ? "" : "s"}${
                   urlSymbol ? ` for ${urlSymbol}` : ""
+                }${
+                  urlSentiment ? ` · ${urlSentiment}` : ""
                 }`}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <SentimentTabs
+            selected={urlSentiment ?? "all"}
+            onChange={onSentimentChange}
+          />
           <label
             htmlFor="news-symbol-filter"
             className="text-xs font-medium text-zinc-600 dark:text-zinc-300"
@@ -176,6 +203,50 @@ export function News() {
       )}
     </div>
   );
+}
+
+function SentimentTabs({
+  selected,
+  onChange,
+}: {
+  selected: SentimentBucket | "all";
+  onChange: (bucket: SentimentBucket | "all") => void;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Filter by sentiment"
+      className="inline-flex rounded-md border border-zinc-200 bg-white p-0.5 dark:border-zinc-700 dark:bg-zinc-900"
+    >
+      {SENTIMENT_BUCKETS.map(({ key, label }) => {
+        const active = selected === key;
+        const palette =
+          key === "positive"
+            ? "data-[active=true]:bg-emerald-100 data-[active=true]:text-emerald-800 dark:data-[active=true]:bg-emerald-900/40 dark:data-[active=true]:text-emerald-300"
+            : key === "negative"
+              ? "data-[active=true]:bg-rose-100 data-[active=true]:text-rose-800 dark:data-[active=true]:bg-rose-900/40 dark:data-[active=true]:text-rose-300"
+              : "data-[active=true]:bg-zinc-100 data-[active=true]:text-zinc-900 dark:data-[active=true]:bg-zinc-800 dark:data-[active=true]:text-zinc-100";
+        return (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            data-active={active}
+            onClick={() => onChange(key)}
+            className={`rounded px-2.5 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 ${palette}`}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function parseSentimentParam(raw: string | null): SentimentBucket | null {
+  if (raw === "positive" || raw === "neutral" || raw === "negative") return raw;
+  return null;
 }
 
 interface DayGroup {

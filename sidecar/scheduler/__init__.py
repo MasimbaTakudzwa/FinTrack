@@ -21,6 +21,7 @@ from sidecar.scheduler.jobs import (
     ingest_news,
     ingest_prices,
     ingest_prices_daily,
+    score_news_sentiment_job,
     train_forecasts_job,
 )
 from sidecar.services.settings import load_effective_config
@@ -182,6 +183,30 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
     else:
         with contextlib.suppress(JobLookupError):
             scheduler.remove_job("train_forecasts")
+
+    if bool(config["score_news_sentiment.enabled"]):
+        # Backfill any unscored articles via VADER. The new-article path is
+        # already covered inline by `ingest_news` so this job is a safety net
+        # for historical rows imported before sentiment was wired plus the
+        # very-occasional "ingest_news scored 0 because the ML backend
+        # blipped" case. Fire-on-first-add so a fresh install with imported
+        # articles populates immediately.
+        sentiment_kwargs: dict[str, Any] = {}
+        if scheduler.get_job("score_news_sentiment") is None:
+            sentiment_kwargs["next_run_time"] = now
+        scheduler.add_job(
+            score_news_sentiment_job,
+            trigger=IntervalTrigger(
+                minutes=int(config["score_news_sentiment.interval_minutes"])
+            ),
+            id="score_news_sentiment",
+            name="VADER sentiment backfill for unscored articles",
+            replace_existing=True,
+            **sentiment_kwargs,
+        )
+    else:
+        with contextlib.suppress(JobLookupError):
+            scheduler.remove_job("score_news_sentiment")
 
 
 def start() -> BackgroundScheduler | None:

@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     enable_alerts_job: bool = True
     enable_prices_daily_job: bool = True
     enable_forecasts_job: bool = True
+    enable_sentiment_job: bool = True
     ingest_prices_interval_minutes: int = 5
     ingest_crypto_interval_minutes: int = 15
     ingest_news_interval_minutes: int = 15
@@ -40,6 +41,11 @@ class Settings(BaseSettings):
     train_forecasts_cron_day_of_week: int = 6
     train_forecasts_cron_hour: int = 23
     check_alerts_interval_minutes: int = 1
+    # Periodic VADER backfill — `ingest_news` already scores new articles
+    # inline, so this is mostly relevant on a fresh install where existing
+    # articles need a one-off catch-up. Hourly default keeps the job cheap
+    # while still catching anything the inline path missed.
+    score_news_sentiment_interval_minutes: int = 60
 
     def resolved_db_path(self) -> str:
         return self.db_path or _default_db_path()

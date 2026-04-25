@@ -1,11 +1,19 @@
 # Phase 2 local ML deps — install on top of requirements.txt to enable the
-# forecasting engine. statsmodels ships SARIMAX plus dozens of time-series
-# tools; numpy / scipy / pandas / patsy come along as transitive deps.
+# forecasting + sentiment engines. All inference happens on the user's
+# machine; nothing here phones home.
+#
+# Forecasting: statsmodels ships SARIMAX plus dozens of time-series tools;
+# numpy / scipy / pandas / patsy come along as transitive deps.
+#
+# Sentiment: vaderSentiment is a self-contained rule-based scorer with its
+# own lexicon (no NLTK download dance). Pure Python, ~100 KB on disk, scores
+# headlines at >5,000/sec on a single CPU thread.
 #
 # Intentionally lightweight: no TensorFlow, no PyTorch, no ONNX runtime in
-# Phase 2's first iteration — we start with a classical statistical model
-# because (a) SARIMAX fits in <1 s per asset on a modern CPU, (b) it doesn't
+# Phase 2's first iteration — we start with classical statistical models
+# because (a) they fit in <1 s per asset on a modern CPU, (b) they don't
 # need a GPU on user machines, (c) the installer stays small (~50 MB extra
 # vs. ~1 GB for TF), and (d) out-of-the-box confidence intervals come for
-# free from the likelihood. Swap to a richer model later if warranted.
+# free from the likelihood. Swap to richer models later if warranted.
 statsmodels>=0.14,<0.16
+vaderSentiment>=3.3,<4.0
