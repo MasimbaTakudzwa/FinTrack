@@ -12,7 +12,7 @@
 ## ⚡ CURRENT STATE
 > Rewritten at the end of every session. Single source of truth for RIGHT NOW.
 
-**Last updated:** 2026-04-25 — Session 006 (Phase 2 ML completion — VADER sentiment + sentiment timeline + Holt-Winters engine alongside SARIMAX + Settings-UI ML controls)
+**Last updated:** 2026-04-25 — Session 006 (Phase 2 ML completion + accuracy tracking — VADER sentiment, sentiment timeline, Holt-Winters engine, Settings-UI ML controls, and rolling MAPE/RMSE/directional accuracy per engine)
 **Active sprint:** Sprint 6 — Phase 2 ML (daily-bar layer ✅, SARIMAX engine ✅, forecast API ✅, AssetDetail overlay + toggle + retrain button ✅, PyInstaller spec updated for statsmodels/scipy/numpy/pandas/patsy ✅, version bumped to 0.2.0 across all 6 manifests ✅, README refreshed ✅, v0.2.0 rebased cleanly onto reconciled main ✅; final `.app` bundle + live smoke + tag-push pending)
 **Overall status:** 🟢 Phase 1 complete (Sprints 1–5). Phase 2 first iteration shipping — 14-day SARIMAX forecast with 80%/95% CI bands overlays the asset chart, nightly auto-retrain plus on-demand "Retrain now" per asset, all running locally in the sidecar against the user's own daily-close history. Post-rebase verification: `pytest` **328/328 green** (up from 304 — main's name-search tests layered in), `ruff check .` clean, `mypy --strict sidecar/` clean on 41 files, `mypy --strict ml/` clean on 4 files, `pnpm -C shell build` clean (581 kB JS / 178 kB gzipped). Branch lineage now linear on main via checkpoints 20 (macro fire-on-first-add + chunk fix, PR #6), 21 (name-based search + TTL cache + debounce), 22 (yfinance.Search swap), then 3 Sprint 6 commits on `claude/phase2-sarimax-v0.2.0` on top.
 
@@ -94,6 +94,24 @@ User pivoted: "stop thinking about shipping small patches and functionality. I r
 - Test counts in `test_api_config.py` / `test_settings_service.py` / `test_scheduler_reconfigure.py` bumped from 16 → 17 keys.
 
 **Verifications (Phase C+D)**: `pytest` **382/382 green** (+16 over Phase A+B's 366), `ruff check .` clean, `mypy --strict sidecar/ ml/` clean on 47 files, `pnpm -C shell lint` clean, `pnpm -C shell build` clean (**596 kB JS / 181 kB gzipped** — up from 590/180 with the Settings ML controls panel + ConfirmDialog wiring + engine selector).
+
+**Phase E — Forecast accuracy tracking** (closes the "which engine fits my data better?" question that motivated Phase C):
+
+- **Migration 0011** adds an append-only ``forecast_snapshots`` table mirroring ``forecasts`` minus the unique-asset_id constraint, plus a composite index on ``(asset_id, generated_at)``. The hot ``forecasts`` table stays single-row-per-asset for fast chart overlays; ``forecast_snapshots`` is the historical record the accuracy module consumes once horizon dates elapse.
+- ``ml/persistence.py`` — ``save_forecast`` now writes to BOTH tables in one transaction (upsert into ``forecasts``, append into ``forecast_snapshots``). New ``load_snapshots(asset_id, since_days=N)`` returns oldest-first, optionally filtered by recency.
+- ``ml/accuracy.py`` (new ~250 LOC) — pure-compute metric layer:
+  - ``_compute_metrics(pairs)`` returns ``(MAPE, RMSE, directional)`` from ``(predicted, actual, last_close)`` triples. MAPE skips zero-actuals to avoid div-by-zero; directional uses the snapshot's own training-tail close as the baseline. All three return ``None`` below ``MIN_EVALUABLE_POINTS = 1`` (or when no directional pairs exist).
+  - ``_evaluable_pairs(snapshot, actuals)`` walks a snapshot's points and yields only those with matching daily-close rows.
+  - ``compute_accuracy(symbol, days)`` orchestrates: loads snapshots in window + matching actuals, walks each snapshot through ``_evaluable_pairs`` + ``_compute_metrics``, breaks down per engine, sorts ``per_engine`` by MAPE ascending (best engine first), and rolls everything into an ``overall`` rollup. Pending snapshots (horizon hasn't elapsed yet) still increment the ``snapshots`` counter so the UI can show "5 snapshots, 0 evaluable yet" instead of an empty panel.
+- **API** — ``GET /api/forecast/{symbol}/accuracy/?days=N`` returns the full report (``per_engine`` array + ``overall`` summary + ``actuals_available`` count). No 404 path: an unknown symbol returns an empty report so the UI renders a "no accuracy data yet" hint without a separate error branch. ``days`` clamped to 1–365.
+- **UI** — new ``ForecastAccuracyPanel`` component (~210 LOC) on AssetDetail, rendered above the existing Stats / Alerts / LatestBar grid. Headline shows the overall MAPE + directional %; below that is a table breakdown by engine with a "Best" pill on the lowest-MAPE engine. ``refreshTick`` prop bumps after every retrain so the panel re-fetches in place (no remount, previous data stays visible until new metrics land — sidesteps the React 19 ``set-state-in-effect`` rule for the loading flicker).
+- **Tests** (24 new, total **406**):
+  - ``test_ml_accuracy.py`` (15): unit tests for ``_compute_metrics`` (perfect / all-wrong-direction / known-MAPE-RMSE / empty / zero-actual-skipping / no-directional-pairs) + ``_evaluable_pairs`` (filters to actuals); integration tests for ``compute_accuracy`` (unknown symbol / no snapshots / single-engine perfect / per-engine sorting / overall rollup / outside-window exclusion / pending-snapshot-counted-but-not-scored / frozen dataclass).
+  - ``test_ml_persistence.py`` (+4): save_forecast appends snapshot, load_snapshots oldest-first ordering, since_days window filtering, CASCADE on asset delete.
+  - ``test_api_forecast.py`` (+4): unknown symbol → empty report, no snapshots → empty report, retraining both engines populates per_engine, days validation.
+  - ``test_migrations.py`` (+1): 0011 creates the table with composite index and CASCADE FK and no unique-asset_id constraint.
+
+**Verifications (Phase E)**: `pytest` **406/406 green** (+24 over Phase D's 382), `ruff check .` clean, `mypy --strict sidecar/ ml/` clean on 49 files, `pnpm -C shell lint` clean, `pnpm -C shell build` clean (**601 kB JS / 182 kB gzipped** — up from 596/181 with ForecastAccuracyPanel + new client helpers).
 
 ### What was just completed (checkpoint 24 — bundle pipeline hardened + branch audit verified)
 User flagged two follow-ups after the v0.2.0 rebase: (a) re-audit the remaining branches now that `git log --cherry-mark` could be run against reconciled main, and (b) fix the silent-bundle-of-stale-sidecar footgun that surfaced when the freshly-rebuilt `.app` was reporting v0.2.0 but `/api/assets/search/` returned 404 because Tauri had bundled a sidecar from before the search route landed.

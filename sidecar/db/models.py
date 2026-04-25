@@ -332,3 +332,44 @@ class Forecast(Base):
     points_json: Mapped[str] = mapped_column(Text)
 
     asset: Mapped[Asset] = relationship()
+
+
+class ForecastSnapshot(Base):
+    """Append-only log of every forecast ever generated for an asset.
+
+    Hot path (``forecasts`` table) keeps the latest row per asset for
+    fast chart overlay. This table preserves history so accuracy
+    metrics — MAPE, RMSE, directional accuracy — can be computed
+    *after* the horizon elapses (was the forecast we made 14 days ago
+    actually any good?).
+
+    Rows are never updated or deleted by application code; the cascading
+    FK on ``asset_id`` is the only delete path.
+    """
+
+    __tablename__ = "forecast_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE")
+    )
+    model: Mapped[str] = mapped_column(String(64))
+    horizon_days: Mapped[int] = mapped_column(default=14)
+    training_rows: Mapped[int] = mapped_column(default=0)
+    last_close: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    last_close_date: Mapped[date] = mapped_column(Date)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+    points_json: Mapped[str] = mapped_column(Text)
+
+    asset: Mapped[Asset] = relationship()
+
+    __table_args__ = (
+        Index(
+            "ix_forecast_snapshots_asset_time",
+            "asset_id",
+            "generated_at",
+        ),
+    )

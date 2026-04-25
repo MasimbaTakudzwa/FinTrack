@@ -34,6 +34,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from ml.accuracy import AccuracyReport, EngineAccuracy, compute_accuracy
 from ml.forecast import (
     ENGINES,
     ForecastEngine,
@@ -113,6 +114,33 @@ class ClearForecastsResponse(BaseModel):
     """Tally of forecasts removed by the bulk-clear endpoint."""
 
     deleted: int
+
+
+class EngineAccuracyModel(BaseModel):
+    """Wire shape for ``ml.accuracy.EngineAccuracy``."""
+
+    engine: str
+    snapshots: int
+    evaluable_points: int
+    mape: float | None
+    rmse: float | None
+    directional: float | None
+
+
+class AccuracyReportModel(BaseModel):
+    """Wire shape for ``ml.accuracy.AccuracyReport``.
+
+    Drives the "Forecast accuracy" panel on AssetDetail. ``per_engine`` is
+    sorted by MAPE ascending (best engine first); ``overall`` rolls every
+    engine into a single headline metric for assets that have only ever
+    used one.
+    """
+
+    symbol: str
+    days: int
+    per_engine: list[EngineAccuracyModel]
+    overall: EngineAccuracyModel | None
+    actuals_available: int
 
 
 # ---------------------------------------------------------------------------
@@ -319,10 +347,58 @@ def clear_all_forecasts() -> ClearForecastsResponse:
     Used after the user switches engines (they want the next chart load to
     show only forecasts produced by the new engine). The price_points and
     articles tables are untouched — re-running ``retrain-all`` immediately
-    rebuilds the corpus.
+    rebuilds the corpus. Note: only the ``forecasts`` (latest-per-asset)
+    rows are removed; ``forecast_snapshots`` history is preserved so the
+    accuracy report can still draw on past runs.
     """
     deleted = 0
     for asset_id in list(all_forecast_asset_ids()):
         if delete_forecast(asset_id):
             deleted += 1
     return ClearForecastsResponse(deleted=deleted)
+
+
+def _engine_accuracy_to_model(ea: EngineAccuracy) -> EngineAccuracyModel:
+    return EngineAccuracyModel(
+        engine=ea.engine,
+        snapshots=ea.snapshots,
+        evaluable_points=ea.evaluable_points,
+        mape=ea.mape,
+        rmse=ea.rmse,
+        directional=ea.directional,
+    )
+
+
+def _accuracy_to_model(report: AccuracyReport) -> AccuracyReportModel:
+    return AccuracyReportModel(
+        symbol=report.symbol,
+        days=report.days,
+        per_engine=[_engine_accuracy_to_model(e) for e in report.per_engine],
+        overall=(
+            _engine_accuracy_to_model(report.overall)
+            if report.overall is not None
+            else None
+        ),
+        actuals_available=report.actuals_available,
+    )
+
+
+@router.get("/{symbol}/accuracy/", response_model=AccuracyReportModel)
+def get_forecast_accuracy(
+    symbol: str,
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
+) -> AccuracyReportModel:
+    """Rolling forecast accuracy for one asset over the last ``days`` days.
+
+    Aggregates every snapshot in the window against the daily closes that
+    have actually landed since. Returns ``per_engine`` (best MAPE first),
+    plus a global ``overall`` rollup. ``snapshots`` counts every snapshot
+    even if its horizon hasn't elapsed yet — UI uses this to label
+    "snapshots seen" vs. "evaluable points" so users understand sparsity.
+
+    No 404 path here — an unknown symbol returns an empty report so the UI
+    can render a "no accuracy data yet" hint without a separate
+    error-handling branch.
+    """
+    report = compute_accuracy(symbol, days=days)
+    return _accuracy_to_model(report)

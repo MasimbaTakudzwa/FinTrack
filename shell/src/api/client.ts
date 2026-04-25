@@ -773,6 +773,42 @@ export function retrainForecast(
   );
 }
 
+export interface EngineAccuracyEntry {
+  engine: string;
+  snapshots: number;
+  evaluable_points: number;
+  /** Mean absolute percentage error (null when no evaluable pairs yet). */
+  mape: number | null;
+  /** Root mean squared error in price units. */
+  rmse: number | null;
+  /** Fraction of forecasts that called direction correctly (0..1). */
+  directional: number | null;
+}
+
+export interface ForecastAccuracyReport {
+  symbol: string;
+  days: number;
+  per_engine: EngineAccuracyEntry[];
+  overall: EngineAccuracyEntry | null;
+  actuals_available: number;
+}
+
+/** Rolling forecast accuracy for one asset. Drives the "How accurate has
+ *  the forecaster been?" panel on AssetDetail and is the headline answer
+ *  to "should I switch engines?". */
+export function getForecastAccuracy(
+  symbol: string,
+  opts: { days?: number; signal?: AbortSignal } = {},
+): Promise<ForecastAccuracyReport> {
+  return apiGet<ForecastAccuracyReport>(
+    `/api/forecast/${encodeURIComponent(symbol)}/accuracy/`,
+    {
+      params: { days: opts.days ?? 30 },
+      signal: opts.signal,
+    },
+  );
+}
+
 export function retrainAllForecasts(
   opts: { engine?: ForecastEngine | null; signal?: AbortSignal } = {},
 ): Promise<RetrainAllResult> {

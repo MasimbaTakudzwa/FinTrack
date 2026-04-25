@@ -6,6 +6,10 @@ Responsibilities:
 - Decode a row back into a `ForecastResult` the UI / API layer can hand off.
 - Upsert over the previous row for an asset — one forecast per asset, always
   the latest. See `0009_create_forecasts.py` for the table-level rationale.
+- Append every save into ``forecast_snapshots`` for accuracy tracking.
+  ``forecasts`` stays single-row-per-asset (fast chart overlay lookup);
+  ``forecast_snapshots`` is the historical record the accuracy module
+  consumes once horizon dates elapse.
 
 We use SQLite's `INSERT ... ON CONFLICT(asset_id) DO UPDATE` so the happy path
 is a single round-trip, and the unique constraint guarantees we can't ever
@@ -27,7 +31,7 @@ from sqlalchemy.orm import Session
 
 from ml.forecast import ForecastPoint, ForecastResult
 from sidecar.db.engine import session_scope
-from sidecar.db.models import Forecast
+from sidecar.db.models import Forecast, ForecastSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +101,18 @@ def _row_to_result(row: Forecast) -> ForecastResult:
 
 
 def save_forecast(asset_id: int, result: ForecastResult) -> None:
-    """Upsert the latest forecast for ``asset_id``.
+    """Upsert the latest forecast for ``asset_id`` AND append to history.
 
-    At most one row exists per asset (`uq_forecasts_asset_id`), so a retrain
-    replaces the previous row wholesale. Safe to call concurrently — SQLite
+    Two writes in one transaction:
+    1. ``forecasts`` — upsert (latest per asset, fast chart lookup).
+    2. ``forecast_snapshots`` — insert (history log, drives accuracy
+       metrics once forecast horizons elapse).
+
+    At most one ``forecasts`` row exists per asset (`uq_forecasts_asset_id`),
+    so a retrain replaces it wholesale. Safe to call concurrently — SQLite
     serialises writes and the unique constraint + `ON CONFLICT DO UPDATE`
-    guarantees idempotency.
+    guarantees idempotency on the latest-row half. The snapshot append is
+    not deduped (every save is a real new record).
     """
     payload = {
         "asset_id": asset_id,
@@ -128,6 +138,9 @@ def save_forecast(asset_id: int, result: ForecastResult) -> None:
             )
         )
         session.execute(stmt)
+        # Append-only history. Same payload, no conflict resolution — every
+        # save is a real new snapshot.
+        session.execute(sqlite_insert(ForecastSnapshot).values(**payload))
     logger.info(
         "save_forecast: asset_id=%d horizon=%d training_rows=%d last_close=%s",
         asset_id,
@@ -199,3 +212,48 @@ def all_forecast_asset_ids() -> list[int]:
     with session_scope() as session:
         rows = session.execute(select(Forecast.asset_id)).scalars().all()
     return list(rows)
+
+
+def load_snapshots(
+    asset_id: int, *, since_days: int | None = None
+) -> list[ForecastResult]:
+    """Return forecast snapshots for an asset, oldest-first.
+
+    ``since_days`` filters by ``generated_at`` — only snapshots produced in
+    the last N days are returned. None pulls the full history. Used by the
+    accuracy module to build rolling metrics.
+    """
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import and_
+
+    with session_scope() as session:
+        stmt = select(ForecastSnapshot).where(
+            ForecastSnapshot.asset_id == asset_id
+        )
+        if since_days is not None:
+            cutoff = datetime.now(UTC) - timedelta(days=since_days)
+            stmt = stmt.where(
+                and_(ForecastSnapshot.generated_at >= cutoff)
+            )
+        stmt = stmt.order_by(ForecastSnapshot.generated_at.asc())
+        rows = list(session.execute(stmt).scalars().all())
+        return [_snapshot_to_result(row) for row in rows]
+
+
+def _snapshot_to_result(row: ForecastSnapshot) -> ForecastResult:
+    """Hydrate a snapshot row into the same dataclass the latest-forecast
+    path uses. Identical to ``_row_to_result`` (same shape) but typed for
+    the snapshot model so SQLAlchemy doesn't complain about variance."""
+    generated = row.generated_at
+    if generated.tzinfo is None:
+        generated = generated.replace(tzinfo=UTC)
+    return ForecastResult(
+        model=row.model,
+        horizon_days=row.horizon_days,
+        training_rows=row.training_rows,
+        last_close=row.last_close,
+        last_close_date=row.last_close_date,
+        generated_at=generated,
+        points=_decode_points(row.points_json),
+    )

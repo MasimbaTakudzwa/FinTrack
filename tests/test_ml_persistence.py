@@ -21,10 +21,11 @@ from ml.persistence import (
     delete_forecast,
     load_forecast,
     load_forecast_by_symbol,
+    load_snapshots,
     save_forecast,
 )
 from sidecar.db.engine import session_scope
-from sidecar.db.models import Asset, AssetType, Forecast
+from sidecar.db.models import Asset, AssetType, Forecast, ForecastSnapshot
 
 
 def _make_result(horizon: int = 14, training_rows: int = 150) -> ForecastResult:
@@ -178,3 +179,110 @@ def test_forecast_deleted_when_asset_deleted(isolated_db: Path) -> None:
         )
 
     assert load_forecast(asset_id) is None
+
+
+# ---------------------------------------------------------------------------
+# forecast_snapshots — append-only history backing the accuracy module.
+# ---------------------------------------------------------------------------
+
+
+def test_save_forecast_appends_snapshot(isolated_db: Path) -> None:
+    """Each save_forecast inserts a row into forecast_snapshots in addition
+    to upserting the latest-row ``forecasts`` table."""
+    asset_id = _seed_asset()
+    save_forecast(asset_id, _make_result(horizon=7, training_rows=100))
+    save_forecast(asset_id, _make_result(horizon=14, training_rows=200))
+
+    with session_scope() as s:
+        snaps = (
+            s.execute(
+                select(ForecastSnapshot).where(
+                    ForecastSnapshot.asset_id == asset_id
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # Two saves → two snapshots (append-only, no upsert).
+        assert len(snaps) == 2
+        # Both snapshots survive even though the latest-row table was
+        # overwritten in place.
+        horizons = sorted(s.horizon_days for s in snaps)
+        assert horizons == [7, 14]
+
+
+def test_load_snapshots_returns_oldest_first(isolated_db: Path) -> None:
+    """``load_snapshots`` orders rows by generated_at ascending so accuracy
+    code can iterate them in chronological order without resorting."""
+    asset_id = _seed_asset()
+
+    older = _make_result(horizon=14, training_rows=50)
+    older = ForecastResult(
+        model=older.model,
+        horizon_days=older.horizon_days,
+        training_rows=older.training_rows,
+        last_close=older.last_close,
+        last_close_date=older.last_close_date,
+        generated_at=datetime(2026, 4, 10, 12, 0, tzinfo=UTC),
+        points=older.points,
+    )
+    newer = _make_result(horizon=14, training_rows=150)
+    newer = ForecastResult(
+        model=newer.model,
+        horizon_days=newer.horizon_days,
+        training_rows=newer.training_rows,
+        last_close=newer.last_close,
+        last_close_date=newer.last_close_date,
+        generated_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+        points=newer.points,
+    )
+
+    save_forecast(asset_id, older)
+    save_forecast(asset_id, newer)
+
+    snaps = load_snapshots(asset_id)
+    assert len(snaps) == 2
+    assert snaps[0].training_rows == 50  # older one first
+    assert snaps[1].training_rows == 150
+
+
+def test_load_snapshots_filters_by_window(isolated_db: Path) -> None:
+    asset_id = _seed_asset()
+    long_ago = _make_result()
+    long_ago = ForecastResult(
+        model=long_ago.model,
+        horizon_days=long_ago.horizon_days,
+        training_rows=long_ago.training_rows,
+        last_close=long_ago.last_close,
+        last_close_date=long_ago.last_close_date,
+        # 200 days back — outside any reasonable accuracy window.
+        generated_at=datetime.now(UTC) - timedelta(days=200),
+        points=long_ago.points,
+    )
+    recent = _make_result()
+    recent = ForecastResult(
+        model=recent.model,
+        horizon_days=recent.horizon_days,
+        training_rows=recent.training_rows,
+        last_close=recent.last_close,
+        last_close_date=recent.last_close_date,
+        generated_at=datetime.now(UTC) - timedelta(days=5),
+        points=recent.points,
+    )
+    save_forecast(asset_id, long_ago)
+    save_forecast(asset_id, recent)
+
+    # 30-day window keeps only the recent snapshot.
+    snaps = load_snapshots(asset_id, since_days=30)
+    assert len(snaps) == 1
+
+
+def test_snapshots_cascade_with_asset_delete(isolated_db: Path) -> None:
+    """CASCADE FK — deleting an asset wipes its snapshot history too."""
+    asset_id = _seed_asset()
+    save_forecast(asset_id, _make_result())
+
+    with session_scope() as s:
+        s.execute(Asset.__table__.delete().where(Asset.id == asset_id))
+
+    assert load_snapshots(asset_id) == []

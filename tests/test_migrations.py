@@ -380,6 +380,60 @@ def test_upgrade_to_head_creates_forecasts_table(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_upgrade_to_head_creates_forecast_snapshots_table(tmp_path: Path) -> None:
+    """0011 adds an append-only ``forecast_snapshots`` table mirroring
+    ``forecasts`` minus the unique-asset_id constraint, plus a composite
+    index on (asset_id, generated_at) for the accuracy job's "last N
+    snapshots per asset" query path."""
+    db_file = tmp_path / "test.db"
+    upgrade_to_head(db_path=str(db_file))
+
+    conn = sqlite3.connect(db_file)
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='forecast_snapshots'"
+        ).fetchone()
+        assert row is not None, "forecast_snapshots table not created"
+
+        cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(forecast_snapshots)").fetchall()
+        }
+        expected = {
+            "id",
+            "asset_id",
+            "model",
+            "horizon_days",
+            "training_rows",
+            "last_close",
+            "last_close_date",
+            "generated_at",
+            "points_json",
+        }
+        assert expected <= cols
+
+        indexes = {
+            r[1]
+            for r in conn.execute("PRAGMA index_list(forecast_snapshots)").fetchall()
+        }
+        assert "ix_forecast_snapshots_asset_time" in indexes
+
+        # No unique constraint on asset_id — append-only allows multiple rows.
+        create_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='forecast_snapshots'"
+        ).fetchone()[0]
+        assert "UNIQUE" not in create_sql.upper().replace("PRIMARY KEY", "")
+
+        fks = conn.execute(
+            "PRAGMA foreign_key_list(forecast_snapshots)"
+        ).fetchall()
+        assert any(fk[2] == "assets" for fk in fks), "missing FK to assets"
+        for fk in fks:
+            if fk[2] == "assets":
+                assert fk[6] == "CASCADE", "FK to assets must cascade on delete"
+    finally:
+        conn.close()
+
+
 def test_upgrade_to_head_adds_sentiment_to_articles(tmp_path: Path) -> None:
     """0010 adds a nullable `sentiment` Float column to `articles` plus an
     index on it (used by the News page sentiment filter and the asset

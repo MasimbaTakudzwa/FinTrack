@@ -33,6 +33,7 @@ import {
 } from "../api/client";
 import { AlertCreateModal } from "../components/AlertCreateModal";
 import { CandleChart } from "../components/CandleChart";
+import { ForecastAccuracyPanel } from "../components/ForecastAccuracyPanel";
 import { NewsList } from "../components/NewsList";
 import { SentimentSummaryPanel } from "../components/SentimentSummaryPanel";
 import { useResolvedTheme } from "../stores/useSettings";
@@ -314,6 +315,10 @@ function AssetBody({
   const [measure, setMeasure] = useState<MeasureState>(MEASURE_EMPTY);
   const [fc, setFc] = useState<ForecastState>(FORECAST_INITIAL);
   const [showForecast, setShowForecast] = useState(false);
+  // Bumps after each successful retrain so the accuracy panel re-fetches.
+  // We don't use `key` because re-mounting would lose the panel's last-
+  // good numbers while the new fetch lands.
+  const [fcRetrainTick, setFcRetrainTick] = useState(0);
 
   // Fetch the persisted forecast on mount. AssetBody is keyed on
   // ``asset.symbol`` by the parent, so this effect only fires once per mount
@@ -348,6 +353,9 @@ function AssetBody({
       // If the user hit "Train now" from a cold state, show them the result
       // immediately — no point hiding what they just asked for.
       setShowForecast(true);
+      // Tell the accuracy panel to refresh — every retrain appends a new
+      // snapshot the metrics should pick up.
+      setFcRetrainTick((t) => t + 1);
     } catch (err) {
       let msg = err instanceof Error ? err.message : String(err);
       if (err instanceof ApiError) {
@@ -546,6 +554,8 @@ function AssetBody({
       </div>
 
       <PerformancePanel allPoints={series.points} />
+
+      <ForecastAccuracyPanel symbol={asset.symbol} refreshTick={fcRetrainTick} />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <StatsPanel points={visiblePoints} tfTitle={tf.title} last={last} />

@@ -365,3 +365,67 @@ def test_clear_all_forecasts_with_no_rows_returns_zero(isolated_db: Path) -> Non
         resp = client.delete("/api/forecast/")
         assert resp.status_code == 200
         assert resp.json()["deleted"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Accuracy endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_accuracy_unknown_symbol_returns_empty_report(isolated_db: Path) -> None:
+    """No 404 — the endpoint returns an empty AccuracyReport so the UI can
+    render a "no accuracy data yet" hint without a separate error path."""
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/NOPE/accuracy/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["symbol"] == "NOPE"
+        assert body["per_engine"] == []
+        assert body["overall"] is None
+        assert body["actuals_available"] == 0
+
+
+def test_accuracy_no_snapshots_returns_empty_report(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/AAPL/accuracy/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["per_engine"] == []
+        assert body["actuals_available"] > 0
+
+
+def test_accuracy_returns_per_engine_after_retrains(isolated_db: Path) -> None:
+    """Train both engines, then check the accuracy endpoint sees both."""
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        client.post("/api/forecast/AAPL/retrain/", params={"engine": "sarimax"})
+        client.post(
+            "/api/forecast/AAPL/retrain/", params={"engine": "holt_winters"}
+        )
+
+        resp = client.get("/api/forecast/AAPL/accuracy/", params={"days": 365})
+        assert resp.status_code == 200
+        body = resp.json()
+        engines = [e["engine"] for e in body["per_engine"]]
+        # Both engines have a snapshot row, even if their horizons haven't
+        # all elapsed yet.
+        assert any("SARIMAX" in e for e in engines)
+        assert any("Holt-Winters" in e for e in engines)
+        # Snapshots tally across the run.
+        total_snapshots = sum(e["snapshots"] for e in body["per_engine"])
+        assert total_snapshots == 2
+
+
+def test_accuracy_days_validation(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        assert (
+            client.get("/api/forecast/AAPL/accuracy/", params={"days": 0}).status_code
+            == 422
+        )
+        assert (
+            client.get(
+                "/api/forecast/AAPL/accuracy/", params={"days": 999}
+            ).status_code
+            == 422
+        )
