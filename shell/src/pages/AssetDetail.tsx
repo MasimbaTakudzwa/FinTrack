@@ -41,6 +41,7 @@ import { CandleChart } from "../components/CandleChart";
 import { ForecastAccuracyPanel } from "../components/ForecastAccuracyPanel";
 import { NewsList } from "../components/NewsList";
 import { SentimentSummaryPanel } from "../components/SentimentSummaryPanel";
+import { StrongSentimentDaysPanel } from "../components/StrongSentimentDaysPanel";
 import { VolatilityPanel } from "../components/VolatilityPanel";
 import { useResolvedTheme } from "../stores/useSettings";
 
@@ -717,6 +718,12 @@ function AssetBody({
         />
         <VolatilityPanel symbol={asset.symbol} />
       </div>
+
+      <StrongSentimentDaysPanel
+        symbol={asset.symbol}
+        sentimentSeries={sentimentSeries}
+      />
+
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <StatsPanel points={visiblePoints} tfTitle={tf.title} last={last} />
