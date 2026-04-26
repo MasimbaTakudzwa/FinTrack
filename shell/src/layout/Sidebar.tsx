@@ -1,6 +1,7 @@
 import {
   Activity,
   Bell,
+  Briefcase,
   GitCompare,
   LineChart,
   Newspaper,
@@ -20,6 +21,7 @@ interface NavItem {
 const ITEMS: NavItem[] = [
   { to: "/", label: "Dashboard", icon: LineChart, end: true },
   { to: "/watchlists", label: "Watchlists", icon: Star },
+  { to: "/portfolio", label: "Portfolio", icon: Briefcase },
   { to: "/market", label: "Market", icon: TrendingUp },
   { to: "/compare", label: "Compare", icon: GitCompare },
   { to: "/news", label: "News", icon: Newspaper },

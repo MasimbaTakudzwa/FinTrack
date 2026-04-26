@@ -709,6 +709,98 @@ export function markAlertNotified(
   );
 }
 
+// ---------- Portfolio ----------
+
+export type TransactionType = "buy" | "sell";
+
+export interface PortfolioTransaction {
+  id: number;
+  asset_id: number;
+  symbol: string;
+  asset_name: string;
+  transaction_type: TransactionType;
+  quantity: string; // Decimal-as-string
+  price_per_unit: string;
+  transaction_date: string; // YYYY-MM-DD
+  fee: string;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface PortfolioPosition {
+  asset_id: number;
+  symbol: string;
+  asset_name: string;
+  quantity: string;
+  avg_cost: string;
+  cost_basis: string;
+  realized_pl: string;
+  last_close: string | null;
+  last_close_at: string | null;
+  current_value: string | null;
+  unrealized_pl: string | null;
+  unrealized_pl_pct: string | null;
+  transaction_count: number;
+}
+
+export interface PortfolioSummary {
+  total_cost_basis: string;
+  total_current_value: string;
+  total_unrealized_pl: string;
+  total_unrealized_pl_pct: string | null;
+  total_realized_pl: string;
+  open_positions: number;
+}
+
+export interface CreateTransactionBody {
+  asset_id: number;
+  transaction_type: TransactionType;
+  quantity: string | number;
+  price_per_unit: string | number;
+  transaction_date: string; // YYYY-MM-DD
+  fee?: string | number;
+  notes?: string | null;
+}
+
+export function listPortfolioTransactions(
+  opts: { assetId?: number; signal?: AbortSignal } = {},
+): Promise<{ count: number; transactions: PortfolioTransaction[] }> {
+  return apiGet("/api/portfolio/transactions/", {
+    params: { asset_id: opts.assetId },
+    signal: opts.signal,
+  });
+}
+
+export function createPortfolioTransaction(
+  body: CreateTransactionBody,
+  signal?: AbortSignal,
+): Promise<PortfolioTransaction> {
+  return apiPost<PortfolioTransaction, CreateTransactionBody>(
+    "/api/portfolio/transactions/",
+    body,
+    { signal },
+  );
+}
+
+export function deletePortfolioTransaction(
+  id: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  return apiDelete(`/api/portfolio/transactions/${id}/`, { signal });
+}
+
+export function listPortfolioPositions(
+  signal?: AbortSignal,
+): Promise<{ count: number; positions: PortfolioPosition[] }> {
+  return apiGet("/api/portfolio/positions/", { signal });
+}
+
+export function getPortfolioSummary(
+  signal?: AbortSignal,
+): Promise<PortfolioSummary> {
+  return apiGet("/api/portfolio/summary/", { signal });
+}
+
 // ---------- Forecast ----------
 
 /** Server-supported engines. Stays as a literal union here so the UI can

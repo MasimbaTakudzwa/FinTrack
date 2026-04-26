@@ -48,6 +48,13 @@ class AlertMetric(StrEnum):
     SENTIMENT = "sentiment"
 
 
+class TransactionType(StrEnum):
+    """Buy/sell side of a portfolio transaction."""
+
+    BUY = "buy"
+    SELL = "sell"
+
+
 class Asset(Base):
     __tablename__ = "assets"
 
@@ -354,6 +361,49 @@ class Forecast(Base):
     points_json: Mapped[str] = mapped_column(Text)
 
     asset: Mapped[Asset] = relationship()
+
+
+class PortfolioTransaction(Base):
+    """Append-only buy/sell log driving position computation.
+
+    No mutable position state lives in the DB — every read derives
+    quantity, average cost, and realized P&L from the transaction
+    history (see :mod:`sidecar.services.portfolio`). Append-only keeps
+    the audit trail intact and avoids the sync issues a parallel
+    "positions" table would introduce.
+    """
+
+    __tablename__ = "portfolio_transactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE")
+    )
+    # Stored as a free-form String rather than SQLEnum so adding a
+    # third type ("dividend") later is a no-migration change. The
+    # application enum is ``TransactionType``.
+    transaction_type: Mapped[str] = mapped_column(String(16))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    price_per_unit: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    transaction_date: Mapped[date] = mapped_column(Date)
+    fee: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6), default=Decimal("0"), server_default="0"
+    )
+    notes: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+    )
+
+    asset: Mapped[Asset] = relationship()
+
+    __table_args__ = (
+        Index(
+            "ix_portfolio_transactions_asset_date",
+            "asset_id",
+            "transaction_date",
+        ),
+    )
 
 
 class ForecastSnapshot(Base):
