@@ -3,6 +3,7 @@ import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./layout/AppShell";
 import { Alerts } from "./pages/Alerts";
 import { AssetDetail } from "./pages/AssetDetail";
+import { Compare } from "./pages/Compare";
 import { Dashboard } from "./pages/Dashboard";
 import { Macro } from "./pages/Macro";
 import { Market } from "./pages/Market";
@@ -30,6 +31,7 @@ function App() {
           <Route index element={<Dashboard />} />
           <Route path="assets/:symbol" element={<AssetDetail />} />
           <Route path="market" element={<Market />} />
+          <Route path="compare" element={<Compare />} />
           <Route path="news" element={<News />} />
           <Route path="watchlists" element={<Watchlists />} />
           <Route path="macro" element={<Macro />} />

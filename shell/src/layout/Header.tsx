@@ -10,6 +10,7 @@ function titleForPath(pathname: string): string {
     return sym ? `Asset — ${decodeURIComponent(sym)}` : "Asset";
   }
   if (pathname.startsWith("/market")) return "Market";
+  if (pathname.startsWith("/compare")) return "Compare";
   if (pathname.startsWith("/news")) return "News";
   if (pathname.startsWith("/watchlists")) return "Watchlists";
   if (pathname.startsWith("/macro")) return "Macro";
