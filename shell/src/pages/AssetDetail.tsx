@@ -21,15 +21,18 @@ import {
   type Asset,
   ApiError,
   type Forecast,
+  type MacroIndicator,
   type PriceAlert,
   type PricePoint,
   type PriceSeries,
   type SentimentTimeseriesPoint,
   getForecast,
+  getMacroSeries,
   getPriceSeries,
   getSentimentTimeseries,
   listAlerts,
   listAssets,
+  listMacroIndicators,
   listNews,
   retrainForecast,
 } from "../api/client";
@@ -338,6 +341,14 @@ function AssetBody({
   const [sentimentSeries, setSentimentSeries] = useState<
     SentimentTimeseriesPoint[]
   >([]);
+  // Macro overlay — user picks a FRED indicator from the chart header
+  // dropdown and we fetch + render it as a secondary-axis line. ``null``
+  // hides the overlay; the same null state hides the left price scale.
+  const [macroIndicators, setMacroIndicators] = useState<MacroIndicator[]>([]);
+  const [macroSeriesId, setMacroSeriesId] = useState<string | null>(null);
+  const [macroPoints, setMacroPoints] = useState<
+    { date: string; value: number }[] | null
+  >(null);
 
   // Fetch the persisted forecast on mount. AssetBody is keyed on
   // ``asset.symbol`` by the parent, so this effect only fires once per mount
@@ -380,6 +391,44 @@ function AssetBody({
       });
     return () => controller.abort();
   }, [asset.symbol]);
+
+  // Macro indicator catalog — populates the chart-header dropdown.
+  // Asset-independent, so we fetch once on mount and never refresh.
+  useEffect(() => {
+    const controller = new AbortController();
+    listMacroIndicators({ activeOnly: true, signal: controller.signal })
+      .then(setMacroIndicators)
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setMacroIndicators([]);
+      });
+    return () => controller.abort();
+  }, []);
+
+  // Fetch the chosen macro series whenever the user picks a different
+  // one. Coerces the Decimal-as-string ``value`` to a float so the chart
+  // can plot it directly. Limit chosen large enough to cover macro
+  // series like DGS10 (daily, ~16k rows since 1962) — lightweight-charts
+  // handles tens of thousands of points without breaking a sweat.
+  //
+  // The "user picked None" path lives in the dropdown's onChange handler
+  // — calling setMacroPoints(null) from the effect body trips the React
+  // 19 ``react-hooks/set-state-in-effect`` rule.
+  useEffect(() => {
+    if (!macroSeriesId) return;
+    const controller = new AbortController();
+    getMacroSeries(macroSeriesId, { limit: 5000, signal: controller.signal })
+      .then((series) =>
+        setMacroPoints(
+          series.points.map((p) => ({ date: p.date, value: Number(p.value) })),
+        ),
+      )
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setMacroPoints([]);
+      });
+    return () => controller.abort();
+  }, [macroSeriesId]);
 
   const onRetrain = async () => {
     setFc((s) => ({ ...s, retraining: true, error: null }));
@@ -552,6 +601,29 @@ function AssetBody({
                 )}
                 Sentiment
               </button>
+              <label className="inline-flex items-center gap-1.5">
+                <span>Macro:</span>
+                <select
+                  value={macroSeriesId ?? ""}
+                  onChange={(e) => {
+                    const next = e.target.value === "" ? null : e.target.value;
+                    setMacroSeriesId(next);
+                    // Clear stale points eagerly so the chart doesn't
+                    // briefly show the previous overlay while the new
+                    // series fetches (or while transitioning to None).
+                    if (next === null) setMacroPoints(null);
+                  }}
+                  disabled={macroIndicators.length === 0}
+                  className="rounded-sm border border-zinc-200 bg-white px-1 py-0.5 text-[11px] font-medium text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                >
+                  <option value="">None</option>
+                  {macroIndicators.map((m) => (
+                    <option key={m.series_id} value={m.series_id}>
+                      {m.series_id}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <span className="inline-flex items-center gap-1.5">
                 <MousePointerClick className="h-3 w-3" />
                 Click two points to measure
@@ -571,6 +643,17 @@ function AssetBody({
               sentiment={
                 showSentimentMarkers && isMultiDayTimeframe(tfId)
                   ? sentimentSeries
+                  : null
+              }
+              macroOverlay={
+                macroSeriesId && macroPoints
+                  ? {
+                      points: macroPoints,
+                      label:
+                        macroIndicators.find(
+                          (m) => m.series_id === macroSeriesId,
+                        )?.name ?? macroSeriesId,
+                    }
                   : null
               }
               measure={{

@@ -61,6 +61,14 @@ interface Props {
    * rebuilt from both sources whenever either changes.
    */
   sentiment?: SentimentTimeseriesPoint[] | null;
+  /**
+   * Macro indicator overlay (FRED series). When set, renders the series
+   * as a thin amber line on a separate price scale on the LEFT side of
+   * the chart so the candles' axis on the right stays uncluttered.
+   * Useful for "did Fed cuts move SPY?" type comparisons. ``label``
+   * is shown in the chart legend / tooltip.
+   */
+  macroOverlay?: { points: { date: string; value: number }[]; label: string } | null;
 }
 
 /** Minimum |mean compound| to surface a day as a chart marker. Matches
@@ -108,6 +116,7 @@ function palette(dark: boolean) {
         forecastBand95: "rgba(165, 180, 252, 0.35)",
         sentimentPositive: "#34d399", // emerald-400
         sentimentNegative: "#fb7185", // rose-400
+        macro: "#fbbf24", // amber-400
       }
     : {
         background: "transparent",
@@ -122,7 +131,17 @@ function palette(dark: boolean) {
         forecastBand95: "rgba(79, 70, 229, 0.30)",
         sentimentPositive: "#10b981", // emerald-500
         sentimentNegative: "#f43f5e", // rose-500
+        macro: "#d97706", // amber-600
       };
+}
+
+function toMacroLine(
+  points: { date: string; value: number }[],
+): LineData<UTCTimestamp>[] {
+  return points.map((p) => ({
+    time: (Date.parse(`${p.date}T00:00:00Z`) / 1000) as UTCTimestamp,
+    value: p.value,
+  }));
 }
 
 /**
@@ -163,6 +182,7 @@ export function CandleChart({
   measure,
   forecast,
   sentiment,
+  macroOverlay,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -170,6 +190,7 @@ export function CandleChart({
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const forecastRef = useRef<ForecastSeries | null>(null);
+  const macroRef = useRef<ISeriesApi<"Line"> | null>(null);
   // Keep the latest onClick inside a ref so the subscribe effect doesn't
   // resubscribe on every render (subscribing + unsubscribing re-triggers
   // the chart's event listener reseat).
@@ -256,6 +277,23 @@ export function CandleChart({
       lineWidth: 1,
     });
 
+    // Macro overlay series — separate price scale on the LEFT side of
+    // the chart so a unit-mismatched indicator (FedFunds in % vs price
+    // in $) doesn't squash the candles. Visible only when macroOverlay
+    // data is set; its scale auto-fits when populated.
+    const macro = chart.addSeries(LineSeries, {
+      color: p.macro,
+      lineWidth: 2,
+      lastValueVisible: true,
+      priceLineVisible: false,
+      crosshairMarkerVisible: true,
+      priceScaleId: "left",
+    });
+    macro.priceScale().applyOptions({
+      visible: false, // keep the axis itself hidden until data lands
+      scaleMargins: { top: 0.1, bottom: 0.4 },
+    });
+
     chartRef.current = chart;
     candleRef.current = candle;
     volumeRef.current = volume;
@@ -267,6 +305,7 @@ export function CandleChart({
       lower95: forecastLower95,
       upper95: forecastUpper95,
     };
+    macroRef.current = macro;
 
     const handleClick = (param: MouseEventParams) => {
       const cb = onClickRef.current;
@@ -286,6 +325,7 @@ export function CandleChart({
       volumeRef.current = null;
       markersRef.current = null;
       forecastRef.current = null;
+      macroRef.current = null;
     };
   }, [dark, height]);
 
@@ -374,6 +414,21 @@ export function CandleChart({
     f.upper95.setData(toLine(forecast, (p) => p.upper_95));
     chartRef.current?.timeScale().fitContent();
   }, [forecast]);
+
+  // Macro overlay series — toggle the left price scale's visibility
+  // alongside the data so an empty overlay doesn't leave an empty axis
+  // sitting on the chart edge.
+  useEffect(() => {
+    const m = macroRef.current;
+    if (!m) return;
+    if (!macroOverlay || macroOverlay.points.length === 0) {
+      m.setData([]);
+      m.priceScale().applyOptions({ visible: false });
+      return;
+    }
+    m.setData(toMacroLine(macroOverlay.points));
+    m.priceScale().applyOptions({ visible: true });
+  }, [macroOverlay]);
 
   return <div ref={containerRef} className="w-full" style={{ height }} />;
 }
