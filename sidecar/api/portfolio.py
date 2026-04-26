@@ -21,10 +21,12 @@ from pydantic import BaseModel, Field
 
 from sidecar.services.portfolio import (
     AssetNotFoundError,
+    PerformancePoint,
     PortfolioError,
     TransactionNotFoundError,
     TransactionOut,
     add_transaction,
+    compute_performance,
     compute_summary,
     delete_transaction,
     get_transaction,
@@ -103,6 +105,22 @@ class PortfolioSummaryOut(BaseModel):
     total_unrealized_pl_pct: Decimal | None
     total_realized_pl: Decimal
     open_positions: int
+
+
+class PerformancePointModel(BaseModel):
+    date: date
+    value: Decimal
+    cost_basis: Decimal
+    realized_pl: Decimal
+
+
+class PerformanceOut(BaseModel):
+    """Daily portfolio-value timeseries — drives the Performance chart on
+    the Portfolio page. Last-observation-carried-forward is applied per
+    asset so weekends + missing-bar days don't punch holes in the line."""
+
+    lookback_days: int
+    points: list[PerformancePointModel]
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +225,27 @@ def list_positions_route() -> PositionsOut:
             )
             for p in positions
         ],
+    )
+
+
+@router.get("/performance/", response_model=PerformanceOut)
+def performance_route(
+    lookback_days: Annotated[int, Query(ge=1, le=3650)] = 90,
+) -> PerformanceOut:
+    """Daily portfolio-value timeseries over the last ``lookback_days``."""
+    points = compute_performance(lookback_days=lookback_days)
+    return PerformanceOut(
+        lookback_days=lookback_days,
+        points=[_perf_to_model(p) for p in points],
+    )
+
+
+def _perf_to_model(p: PerformancePoint) -> PerformancePointModel:
+    return PerformancePointModel(
+        date=p.date,
+        value=p.value,
+        cost_basis=p.cost_basis,
+        realized_pl=p.realized_pl,
     )
 
 

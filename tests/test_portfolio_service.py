@@ -7,7 +7,7 @@ transaction sequences with known answers keep us honest.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -395,6 +395,142 @@ def test_compute_summary_empty_portfolio(isolated_db: Path) -> None:
     assert s.total_cost_basis == Decimal("0")
     assert s.total_current_value == Decimal("0")
     assert s.total_realized_pl == Decimal("0")
+
+
+def test_compute_performance_no_transactions_returns_empty(
+    isolated_db: Path,
+) -> None:
+    assert svc.compute_performance(lookback_days=90) == []
+
+
+def test_compute_performance_clamps_window_to_first_transaction(
+    isolated_db: Path,
+) -> None:
+    """A 365-day lookback when the first transaction is 5 days ago should
+    only emit points within the held period — not 360 days of zero."""
+    aid = _seed_asset()
+    today = date.today()
+    svc.add_transaction(
+        asset_id=aid,
+        transaction_type="buy",
+        quantity=Decimal("10"),
+        price_per_unit=Decimal("100"),
+        transaction_date=today - timedelta(days=2),
+    )
+    # Seed a couple of recent closes so there's something to plot.
+    with session_scope() as s:
+        for offset in range(3):
+            d = today - timedelta(days=offset)
+            s.add(
+                PricePoint(
+                    asset_id=aid,
+                    timestamp=datetime(d.year, d.month, d.day, tzinfo=UTC),
+                    interval="1d",
+                    open=Decimal("110"),
+                    high=Decimal("110"),
+                    low=Decimal("110"),
+                    close=Decimal("110"),
+                    volume=0,
+                )
+            )
+
+    points = svc.compute_performance(lookback_days=365)
+    # Three close-bearing dates are inside the held window; the
+    # clamped start date drops the empty pre-buy ones.
+    assert all(p.date >= today - timedelta(days=3) for p in points)
+    assert len(points) >= 1
+
+
+def test_compute_performance_carries_close_forward(isolated_db: Path) -> None:
+    """A weekend gap shouldn't punch a hole in the line — the most
+    recent close is carried forward."""
+    aid = _seed_asset()
+    today = date.today()
+    svc.add_transaction(
+        asset_id=aid,
+        transaction_type="buy",
+        quantity=Decimal("10"),
+        price_per_unit=Decimal("100"),
+        transaction_date=today - timedelta(days=10),
+    )
+    # Closes on day -5 and day -3 only. Day -4 has no close.
+    with session_scope() as s:
+        for offset in (5, 3):
+            d = today - timedelta(days=offset)
+            s.add(
+                PricePoint(
+                    asset_id=aid,
+                    timestamp=datetime(d.year, d.month, d.day, tzinfo=UTC),
+                    interval="1d",
+                    open=Decimal("100"),
+                    high=Decimal("100"),
+                    low=Decimal("100"),
+                    close=Decimal("100"),
+                    volume=0,
+                )
+            )
+
+    points = svc.compute_performance(lookback_days=20)
+    # Two emitted points — one per close date.
+    assert len(points) == 2
+    # Both have value = 10 * 100 = 1000.
+    for p in points:
+        assert p.value == Decimal("1000")
+
+
+def test_compute_performance_open_and_closed_split(isolated_db: Path) -> None:
+    """After a sell that closes the position, ``value`` drops to 0 but
+    ``realized_pl`` reflects the gain."""
+    aid = _seed_asset()
+    today = date.today()
+    svc.add_transaction(
+        asset_id=aid,
+        transaction_type="buy",
+        quantity=Decimal("10"),
+        price_per_unit=Decimal("100"),
+        transaction_date=today - timedelta(days=4),
+    )
+    svc.add_transaction(
+        asset_id=aid,
+        transaction_type="sell",
+        quantity=Decimal("10"),
+        price_per_unit=Decimal("120"),
+        transaction_date=today - timedelta(days=1),
+    )
+    with session_scope() as s:
+        for offset in (3, 2, 1, 0):
+            d = today - timedelta(days=offset)
+            s.add(
+                PricePoint(
+                    asset_id=aid,
+                    timestamp=datetime(d.year, d.month, d.day, tzinfo=UTC),
+                    interval="1d",
+                    open=Decimal("110"),
+                    high=Decimal("110"),
+                    low=Decimal("110"),
+                    close=Decimal("110"),
+                    volume=0,
+                )
+            )
+
+    points = svc.compute_performance(lookback_days=14)
+    by_date = {p.date: p for p in points}
+    # On day -3 the position is open at qty=10, value = 10*110 = 1100.
+    pre_sell = by_date.get(today - timedelta(days=3))
+    assert pre_sell is not None
+    assert pre_sell.value == Decimal("1100")
+    assert pre_sell.realized_pl == Decimal("0")
+    # On day 0 (after the sell) the position is closed → value=0 and
+    # realized_pl reflects the 10 * (120 - 100) = 200 gain.
+    post_sell = by_date.get(today)
+    assert post_sell is not None
+    assert post_sell.value == Decimal("0")
+    assert post_sell.realized_pl == Decimal("200")
+
+
+def test_compute_performance_invalid_lookback_raises(isolated_db: Path) -> None:
+    with pytest.raises(svc.PortfolioError):
+        svc.compute_performance(lookback_days=0)
 
 
 def test_transactions_cascade_when_asset_deleted(isolated_db: Path) -> None:

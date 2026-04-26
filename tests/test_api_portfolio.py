@@ -246,3 +246,54 @@ def test_summary_empty(isolated_db: Path) -> None:
         assert body["open_positions"] == 0
         assert Decimal(body["total_cost_basis"]) == Decimal("0")
         assert body["total_unrealized_pl_pct"] is None
+
+
+# ---------------------------------------------------------------------------
+# performance endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_performance_empty_returns_no_points(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.get("/api/portfolio/performance/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["points"] == []
+        assert body["lookback_days"] == 90
+
+
+def test_performance_with_position_returns_points(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    _add_close(aid, Decimal("110"))
+    with TestClient(app) as client:
+        client.post(
+            "/api/portfolio/transactions/",
+            json={
+                "asset_id": aid,
+                "transaction_type": "buy",
+                "quantity": "10",
+                "price_per_unit": "100",
+                "transaction_date": "2026-04-01",
+            },
+        )
+        resp = client.get("/api/portfolio/performance/")
+        body = resp.json()
+        # At least one point with value > 0.
+        assert len(body["points"]) >= 1
+        assert any(Decimal(p["value"]) > 0 for p in body["points"])
+
+
+def test_performance_lookback_validation(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        assert (
+            client.get(
+                "/api/portfolio/performance/", params={"lookback_days": 0}
+            ).status_code
+            == 422
+        )
+        assert (
+            client.get(
+                "/api/portfolio/performance/", params={"lookback_days": 999999}
+            ).status_code
+            == 422
+        )

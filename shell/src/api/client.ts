@@ -801,6 +801,27 @@ export function getPortfolioSummary(
   return apiGet("/api/portfolio/summary/", { signal });
 }
 
+export interface PerformancePoint {
+  date: string; // YYYY-MM-DD
+  value: string;
+  cost_basis: string;
+  realized_pl: string;
+}
+
+export interface PortfolioPerformance {
+  lookback_days: number;
+  points: PerformancePoint[];
+}
+
+export function getPortfolioPerformance(
+  opts: { lookbackDays?: number; signal?: AbortSignal } = {},
+): Promise<PortfolioPerformance> {
+  return apiGet<PortfolioPerformance>("/api/portfolio/performance/", {
+    params: { lookback_days: opts.lookbackDays ?? 90 },
+    signal: opts.signal,
+  });
+}
+
 // ---------- Forecast ----------
 
 /** Server-supported engines. Stays as a literal union here so the UI can

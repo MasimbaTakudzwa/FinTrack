@@ -21,6 +21,8 @@ import {
   listPortfolioTransactions,
 } from "../api/client";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { PortfolioAllocationCard } from "../components/PortfolioAllocationCard";
+import { PortfolioPerformanceChart } from "../components/PortfolioPerformanceChart";
 import { TransactionAddModal } from "../components/TransactionAddModal";
 
 type TabId = "positions" | "transactions";
@@ -160,6 +162,15 @@ export function Portfolio() {
       )}
 
       <SummaryCard summary={state.summary} loading={state.loading} />
+
+      {state.positions.length > 0 && (
+        <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <div className="lg:col-span-2">
+            <PortfolioPerformanceChart refreshTick={tick} />
+          </div>
+          <PortfolioAllocationCard positions={state.positions} />
+        </div>
+      )}
 
       <div className="mt-5 mb-3 flex gap-2 border-b border-zinc-200 dark:border-zinc-800">
         {(["positions", "transactions"] as const).map((t) => (

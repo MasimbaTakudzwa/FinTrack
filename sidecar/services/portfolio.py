@@ -412,6 +412,186 @@ def list_positions() -> list[PositionSummary]:
         return positions
 
 
+@dataclass(frozen=True)
+class PerformancePoint:
+    """One date in the portfolio-value timeseries.
+
+    ``value`` is the sum across open positions of ``qty x daily_close``
+    for that date; ``cost_basis`` is the corresponding sum of
+    ``qty x avg_cost`` so the UI can plot both as side-by-side lines
+    and the gap between them is unrealized P&L. ``realized_pl`` is the
+    cumulative realized P&L through that date — flat-line until a sell
+    happens, then steps up.
+    """
+
+    date: date
+    value: Decimal
+    cost_basis: Decimal
+    realized_pl: Decimal
+
+
+def _position_state_as_of(
+    transactions: Sequence[PortfolioTransaction], cutoff_date: date
+) -> dict[int, tuple[Decimal, Decimal]]:
+    """Compute (quantity, avg_cost) per asset as of ``cutoff_date``.
+
+    Walks transactions on or before the cutoff through the same
+    average-cost recursion the rest of the service uses. Returns
+    asset_id → (qty, avg_cost), with avg_cost == 0 for closed
+    positions (which the caller can filter out).
+    """
+    by_asset: dict[int, list[PortfolioTransaction]] = {}
+    for t in transactions:
+        if t.transaction_date > cutoff_date:
+            continue
+        by_asset.setdefault(t.asset_id, []).append(t)
+
+    out: dict[int, tuple[Decimal, Decimal]] = {}
+    for aid, txns in by_asset.items():
+        qty, avg_cost, _ = _compute_position_state(txns)
+        out[aid] = (qty, avg_cost)
+    return out
+
+
+def _realized_pl_as_of(
+    transactions: Sequence[PortfolioTransaction], cutoff_date: date
+) -> Decimal:
+    """Cumulative realized P&L across all assets through ``cutoff_date``."""
+    by_asset: dict[int, list[PortfolioTransaction]] = {}
+    for t in transactions:
+        if t.transaction_date > cutoff_date:
+            continue
+        by_asset.setdefault(t.asset_id, []).append(t)
+
+    total = Decimal("0")
+    for txns in by_asset.values():
+        _, _, realized = _compute_position_state(txns)
+        total += realized
+    return total
+
+
+def compute_performance(lookback_days: int = 90) -> list[PerformancePoint]:
+    """Daily portfolio value + cost basis + realized P&L over the window.
+
+    Sample rate: one point per calendar date that has at least one
+    daily close for any held asset within the lookback. Closed
+    positions don't contribute to ``value`` (qty=0) but their realized
+    P&L is included in the ``realized_pl`` rollup so users can see the
+    full cumulative outcome.
+
+    Edge cases:
+    - No transactions at all → empty list (caller renders empty state).
+    - First transaction is more recent than ``lookback_days`` → window
+      shrinks to start at the first transaction date so the chart
+      doesn't show a misleading flat-zero prefix.
+    - Asset has no daily close on a given date → its contribution is
+      carried forward from the most recent close before that date
+      (last-observation-carried-forward), so the line stays smooth on
+      weekends + missing-bar days.
+    """
+    if lookback_days <= 0:
+        raise PortfolioError("lookback_days must be > 0")
+
+    with session_scope() as s:
+        # Pull every transaction up front — small data set, simpler than
+        # repeating the filter inside the per-date loop.
+        txn_rows = list(
+            s.execute(
+                select(PortfolioTransaction).order_by(
+                    PortfolioTransaction.transaction_date.asc(),
+                    PortfolioTransaction.id.asc(),
+                )
+            ).scalars()
+        )
+        if not txn_rows:
+            return []
+
+        earliest_txn_date = min(t.transaction_date for t in txn_rows)
+        today_d = datetime.now(UTC).date()
+        from datetime import timedelta as _td  # local import — small surface
+
+        cutoff = max(today_d - _td(days=lookback_days), earliest_txn_date)
+
+        asset_ids = sorted({t.asset_id for t in txn_rows})
+
+        # Pull daily closes for each held asset since the earliest
+        # transaction date — we may need a bar before the cutoff to
+        # carry forward into the window's first day.
+        closes_by_asset: dict[int, list[tuple[date, Decimal]]] = {}
+        for aid in asset_ids:
+            rows = s.execute(
+                select(PricePoint.timestamp, PricePoint.close).where(
+                    PricePoint.asset_id == aid,
+                    PricePoint.interval == "1d",
+                    PricePoint.timestamp
+                    >= datetime.combine(
+                        earliest_txn_date, datetime.min.time(), UTC
+                    ),
+                )
+            ).all()
+            # Dedup on date, then sort.
+            by_date: dict[date, Decimal] = {}
+            for ts, close in rows:
+                by_date[ts.date()] = close
+            closes_by_asset[aid] = sorted(by_date.items())
+
+    # Build the chart's date axis: every distinct date that has at
+    # least one daily close inside the window. We iterate calendar days
+    # and pick those that have any close — keeps the axis tight without
+    # gaps for never-trading-days.
+    candidate_dates: set[date] = set()
+    for closes in closes_by_asset.values():
+        for d, _ in closes:
+            if d >= cutoff and d <= today_d:
+                candidate_dates.add(d)
+    if not candidate_dates:
+        return []
+    sorted_dates = sorted(candidate_dates)
+
+    points: list[PerformancePoint] = []
+    for d in sorted_dates:
+        positions = _position_state_as_of(txn_rows, d)
+        total_value = Decimal("0")
+        total_cost = Decimal("0")
+        for aid, (qty, avg_cost) in positions.items():
+            if qty <= 0:
+                continue
+            close = _close_on_or_before(closes_by_asset[aid], d)
+            if close is None:
+                continue
+            total_value += qty * close
+            total_cost += qty * avg_cost
+        realized = _realized_pl_as_of(txn_rows, d)
+        points.append(
+            PerformancePoint(
+                date=d,
+                value=total_value,
+                cost_basis=total_cost,
+                realized_pl=realized,
+            )
+        )
+    return points
+
+
+def _close_on_or_before(
+    closes: list[tuple[date, Decimal]], target: date
+) -> Decimal | None:
+    """Last-observation-carried-forward lookup for daily closes.
+
+    Returns the close on ``target`` if available, else the most recent
+    close strictly before. None when no close is on file at all (e.g.
+    asset added after the first portfolio date).
+    """
+    if not closes:
+        return None
+    # closes is sorted asc — walk backwards to find the latest entry
+    # not after `target`.
+    for d, c in reversed(closes):
+        if d <= target:
+            return c
+    return None
+
+
 def compute_summary() -> PortfolioSummary:
     """Roll up portfolio-wide totals from the per-position list.
 
