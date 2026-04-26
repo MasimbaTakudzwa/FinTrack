@@ -152,6 +152,16 @@ User pivoted: "stop thinking about shipping small patches and functionality. I r
 
 **Verifications (Phase G)**: `pytest` **451/451 green** (+21 over Phase F's 430), `ruff check .` clean, `mypy --strict sidecar/ ml/` clean on 52 files, `pnpm -C shell lint` clean, `pnpm -C shell build` clean (**610 kB JS / 184 kB gzipped** — up from 607/184 with the new VolatilityPanel + client helper).
 
+**Phase H — Sentiment-driven price chart markers** (visual integration of sentiment + price work):
+
+- Extended `CandleChart` with a new optional `sentiment?: SentimentTimeseriesPoint[] | null` prop. Days with `|mean compound| ≥ 0.30` AND `count ≥ 2` scored headlines surface as colored markers on the candle chart — emerald arrowUp for positive days (positioned `aboveBar`), rose arrowDown for negative days (positioned `belowBar`), with the headline count rendered as marker text.
+- Single-markers-plugin coordination: `CandleChart` already had a markers plugin for the click-to-measure A/B markers. The same plugin's `setMarkers` is REPLACE-not-merge, so I unified the measure-marker effect with sentiment markers — both sources composed in one effect, sorted ascending by epoch time before being handed to the plugin (lightweight-charts requires this ordering).
+- Threshold tuning: `SENTIMENT_MARKER_THRESHOLD = 0.30` is intentionally stricter than `ml.sentiment`'s ±0.05 classification cutoff so we only flag genuinely strong news polarity, not slightly-leaning days. `SENTIMENT_MARKER_MIN_COUNT = 2` filters single-headline days as too noisy.
+- AssetDetail wires `getSentimentTimeseries(symbol, days=90)` once per asset and passes the points to `CandleChart` only when (a) the user-toggleable `showSentimentMarkers` flag is on AND (b) the current timeframe is multi-day (`3D` / `1W` / `ALL`). Intraday timeframes anchor sentiment markers at midnight UTC, which clusters them awkwardly — `isMultiDayTimeframe(tfId)` gates the rendering.
+- New "Sentiment" toggle in the chart header alongside the existing "Forecast" toggle. Disabled with a tooltip explaining why on intraday timeframes / when there's no sentiment data yet.
+
+**Verifications (Phase H)**: no new tests (pure UI integration over existing API), `pnpm -C shell lint` clean, `pnpm -C shell build` clean (**612 kB JS / 184 kB gzipped** — up from 610/184 with the marker composition + new toggle button). Backend `pytest 451/451`, `ruff`, `mypy --strict` all unchanged from Phase G.
+
 ### What was just completed (checkpoint 24 — bundle pipeline hardened + branch audit verified)
 User flagged two follow-ups after the v0.2.0 rebase: (a) re-audit the remaining branches now that `git log --cherry-mark` could be run against reconciled main, and (b) fix the silent-bundle-of-stale-sidecar footgun that surfaced when the freshly-rebuilt `.app` was reporting v0.2.0 but `/api/assets/search/` returned 404 because Tauri had bundled a sidecar from before the search route landed.
 

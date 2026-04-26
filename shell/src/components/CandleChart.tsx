@@ -17,7 +17,11 @@ import {
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
-import type { Forecast, PricePoint } from "../api/client";
+import type {
+  Forecast,
+  PricePoint,
+  SentimentTimeseriesPoint,
+} from "../api/client";
 
 interface MeasurePoint {
   time: UTCTimestamp;
@@ -48,7 +52,25 @@ interface Props {
    * to hide.
    */
   forecast?: Forecast | null;
+  /**
+   * Daily sentiment timeseries. When set, days whose mean compound score
+   * crosses the strong-signal threshold are rendered as colored markers
+   * above the candle for that day — emerald for positive, rose for
+   * negative. Pass `null` / `undefined` to hide. Markers don't fight
+   * with measure markers; both share one markers plugin which is
+   * rebuilt from both sources whenever either changes.
+   */
+  sentiment?: SentimentTimeseriesPoint[] | null;
 }
+
+/** Minimum |mean compound| to surface a day as a chart marker. Matches
+ *  the bucket-classification thresholds in `ml.sentiment` (positive /
+ *  negative cutoffs at ±0.05) but raised to 0.30 here so we only flag
+ *  days with genuinely strong news polarity, not slightly-leaning ones. */
+const SENTIMENT_MARKER_THRESHOLD = 0.3;
+/** Minimum scored-headline count for a day to qualify — single-headline
+ *  days are too noisy to surface as a marker. */
+const SENTIMENT_MARKER_MIN_COUNT = 2;
 
 function toCandles(points: PricePoint[]): CandlestickData<UTCTimestamp>[] {
   return points.map((p) => ({
@@ -84,6 +106,8 @@ function palette(dark: boolean) {
         forecastMedian: "#a5b4fc", // indigo-300
         forecastBand80: "rgba(165, 180, 252, 0.70)",
         forecastBand95: "rgba(165, 180, 252, 0.35)",
+        sentimentPositive: "#34d399", // emerald-400
+        sentimentNegative: "#fb7185", // rose-400
       }
     : {
         background: "transparent",
@@ -96,6 +120,8 @@ function palette(dark: boolean) {
         forecastMedian: "#4f46e5", // indigo-600
         forecastBand80: "rgba(79, 70, 229, 0.55)",
         forecastBand95: "rgba(79, 70, 229, 0.30)",
+        sentimentPositive: "#10b981", // emerald-500
+        sentimentNegative: "#f43f5e", // rose-500
       };
 }
 
@@ -136,6 +162,7 @@ export function CandleChart({
   height = 380,
   measure,
   forecast,
+  sentiment,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -274,22 +301,57 @@ export function CandleChart({
     onClickRef.current = measure?.onClick ?? null;
   }, [measure?.onClick]);
 
-  // Reflect measure-point markers on the chart.
+  // Reflect measure-point markers + sentiment markers on the chart in a
+  // single setMarkers call. Both sources share the one markers plugin
+  // attached to the candle series; if we managed them in separate
+  // effects the second setMarkers would clobber the first's output.
   useEffect(() => {
     if (!markersRef.current) return;
     const p = palette(dark);
-    const pts: MeasurePoint[] = [];
-    if (measure?.first) pts.push(measure.first);
-    if (measure?.second) pts.push(measure.second);
-    const markers: SeriesMarker<Time>[] = pts.map((pt, idx) => ({
-      time: pt.time,
-      position: "inBar",
-      shape: "circle",
-      color: p.marker,
-      text: idx === 0 ? "A" : "B",
-    }));
-    markersRef.current.setMarkers(markers);
-  }, [measure?.first, measure?.second, dark]);
+    const merged: SeriesMarker<Time>[] = [];
+
+    // Measure points first so they sort before sentiment markers when
+    // they happen to fall on the same date.
+    const measurePts: MeasurePoint[] = [];
+    if (measure?.first) measurePts.push(measure.first);
+    if (measure?.second) measurePts.push(measure.second);
+    measurePts.forEach((pt, idx) => {
+      merged.push({
+        time: pt.time,
+        position: "inBar",
+        shape: "circle",
+        color: p.marker,
+        text: idx === 0 ? "A" : "B",
+      });
+    });
+
+    if (sentiment && sentiment.length > 0) {
+      for (const s of sentiment) {
+        if (
+          Math.abs(s.mean) < SENTIMENT_MARKER_THRESHOLD ||
+          s.count < SENTIMENT_MARKER_MIN_COUNT
+        ) {
+          continue;
+        }
+        const isPositive = s.mean > 0;
+        // Anchor at midnight UTC of the bucket date — matches how the
+        // sentiment-timeline chart positions its histogram bars.
+        const time = (Date.parse(`${s.date}T00:00:00Z`) / 1000) as UTCTimestamp;
+        merged.push({
+          time,
+          position: isPositive ? "aboveBar" : "belowBar",
+          shape: isPositive ? "arrowUp" : "arrowDown",
+          color: isPositive ? p.sentimentPositive : p.sentimentNegative,
+          text: `${s.count}`,
+        });
+      }
+    }
+
+    // The plugin requires markers in ascending time order to render
+    // correctly — sort by epoch seconds.
+    merged.sort((a, b) => Number(a.time) - Number(b.time));
+    markersRef.current.setMarkers(merged);
+  }, [measure?.first, measure?.second, sentiment, dark]);
 
   // Push forecast data (or empty arrays to hide) into the overlay series.
   // Guarded by the chart-created ref so hot-reload re-renders don't crash on

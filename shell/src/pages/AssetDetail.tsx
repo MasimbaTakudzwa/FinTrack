@@ -24,8 +24,10 @@ import {
   type PriceAlert,
   type PricePoint,
   type PriceSeries,
+  type SentimentTimeseriesPoint,
   getForecast,
   getPriceSeries,
+  getSentimentTimeseries,
   listAlerts,
   listAssets,
   listNews,
@@ -224,6 +226,14 @@ export function AssetDetail() {
 
 type TimeframeId = "1H" | "4H" | "1D" | "3D" | "1W" | "ALL";
 
+/** Sentiment markers anchor at midnight UTC of each calendar day; on
+ *  intraday timeframes the markers cluster awkwardly at one x-coordinate
+ *  per day. We restrict them to multi-day views where each day is
+ *  visually distinct. */
+function isMultiDayTimeframe(id: TimeframeId): boolean {
+  return id === "3D" || id === "1W" || id === "ALL";
+}
+
 interface Timeframe {
   id: TimeframeId;
   label: string;
@@ -320,6 +330,14 @@ function AssetBody({
   // We don't use `key` because re-mounting would lose the panel's last-
   // good numbers while the new fetch lands.
   const [fcRetrainTick, setFcRetrainTick] = useState(0);
+  // Sentiment timeseries → daily markers on the candle chart. Only
+  // surfaced for multi-day timeframes (intraday density makes the
+  // markers cluster at midnight and look out of place). We fetch once
+  // per asset and let the timeframe gate handle visibility.
+  const [showSentimentMarkers, setShowSentimentMarkers] = useState(true);
+  const [sentimentSeries, setSentimentSeries] = useState<
+    SentimentTimeseriesPoint[]
+  >([]);
 
   // Fetch the persisted forecast on mount. AssetBody is keyed on
   // ``asset.symbol`` by the parent, so this effect only fires once per mount
@@ -342,6 +360,23 @@ function AssetBody({
         }
         const msg = err instanceof Error ? err.message : String(err);
         setFc({ data: null, status: "error", error: msg, retraining: false });
+      });
+    return () => controller.abort();
+  }, [asset.symbol]);
+
+  // Pull the daily sentiment timeseries once per asset. Used by the
+  // candle chart to flag strong-news days as colored markers. Errors
+  // are non-fatal — markers just stay hidden.
+  useEffect(() => {
+    const controller = new AbortController();
+    getSentimentTimeseries(asset.symbol, {
+      days: 90,
+      signal: controller.signal,
+    })
+      .then((data) => setSentimentSeries(data.points))
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setSentimentSeries([]);
       });
     return () => controller.abort();
   }, [asset.symbol]);
@@ -486,6 +521,37 @@ function AssetBody({
                 )}
                 Forecast
               </button>
+              <button
+                type="button"
+                onClick={() => setShowSentimentMarkers((v) => !v)}
+                disabled={
+                  !isMultiDayTimeframe(tfId) || sentimentSeries.length === 0
+                }
+                title={
+                  !isMultiDayTimeframe(tfId)
+                    ? "Sentiment markers are only shown on daily+ timeframes"
+                    : sentimentSeries.length === 0
+                      ? "No sentiment data for this asset yet"
+                      : showSentimentMarkers
+                        ? "Hide sentiment markers"
+                        : "Show sentiment markers"
+                }
+                className={[
+                  "inline-flex items-center gap-1 rounded-sm border px-2 py-0.5 transition-colors",
+                  showSentimentMarkers &&
+                  isMultiDayTimeframe(tfId) &&
+                  sentimentSeries.length > 0
+                    ? "border-emerald-500/60 bg-emerald-500/10 text-emerald-700 dark:border-emerald-400/60 dark:text-emerald-300"
+                    : "border-zinc-200 text-zinc-500 hover:text-zinc-800 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200",
+                ].join(" ")}
+              >
+                {showSentimentMarkers ? (
+                  <EyeOff className="h-3 w-3" />
+                ) : (
+                  <Eye className="h-3 w-3" />
+                )}
+                Sentiment
+              </button>
               <span className="inline-flex items-center gap-1.5">
                 <MousePointerClick className="h-3 w-3" />
                 Click two points to measure
@@ -502,6 +568,11 @@ function AssetBody({
               points={visiblePoints}
               dark={dark}
               forecast={showForecast ? fc.data : null}
+              sentiment={
+                showSentimentMarkers && isMultiDayTimeframe(tfId)
+                  ? sentimentSeries
+                  : null
+              }
               measure={{
                 first: measure.first
                   ? {
