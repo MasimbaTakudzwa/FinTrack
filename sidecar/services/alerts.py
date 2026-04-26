@@ -33,16 +33,30 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from sidecar.db.engine import session_scope
-from sidecar.db.models import AlertDirection, Asset, PriceAlert, PricePoint
+from sidecar.db.models import (
+    AlertDirection,
+    AlertMetric,
+    Article,
+    ArticleAsset,
+    Asset,
+    PriceAlert,
+    PricePoint,
+)
 
 logger = logging.getLogger(__name__)
+
+
+SENTIMENT_WINDOW_MIN_DAYS = 1
+SENTIMENT_WINDOW_MAX_DAYS = 365
+SENTIMENT_THRESHOLD_MIN = Decimal("-1")
+SENTIMENT_THRESHOLD_MAX = Decimal("1")
 
 
 class AlertError(ValueError):
@@ -65,13 +79,24 @@ class AlertOut:
     asset_name: str
     threshold: Decimal
     direction: AlertDirection
+    metric: AlertMetric
+    window_days: int | None
     is_active: bool
     triggered_at: datetime | None
     notified_at: datetime | None
     note: str | None
     created_at: datetime
+    # Always populated for price alerts; populated for sentiment alerts
+    # via ``current_value`` instead — this field stays as the latest
+    # close so the UI can show "$X today" alongside any alert type.
     last_price: Decimal | None
     last_price_at: datetime | None
+    # The metric's current observed value — for price alerts this is
+    # the latest close; for sentiment alerts it's the rolling-mean
+    # compound score over ``window_days``. None when no observation is
+    # available (e.g. brand-new asset with no closes yet, or sentiment
+    # alert against a window with no scored articles).
+    current_value: Decimal | None
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +104,13 @@ class AlertOut:
 # ---------------------------------------------------------------------------
 
 
-def _to_decimal(value: Any, *, field: str) -> Decimal:
+def _to_decimal(value: Any, *, field: str, allow_negative: bool = False) -> Decimal:
+    """Coerce a free-form numeric input to a Decimal with validation.
+
+    By default rejects ``<= 0`` (the price-threshold contract). When
+    ``allow_negative`` is True the bounds check is skipped — used by
+    the sentiment threshold path which accepts the [-1, +1] range.
+    """
     if isinstance(value, Decimal):
         d = value
     else:
@@ -87,9 +118,79 @@ def _to_decimal(value: Any, *, field: str) -> Decimal:
             d = Decimal(str(value))
         except (InvalidOperation, TypeError) as exc:
             raise AlertError(f"{field}: not a valid decimal") from exc
-    if d <= 0:
+    if not allow_negative and d <= 0:
         raise AlertError(f"{field}: must be > 0")
     return d
+
+
+def _parse_metric(value: AlertMetric | str | None) -> AlertMetric:
+    if value is None:
+        return AlertMetric.PRICE
+    if isinstance(value, AlertMetric):
+        return value
+    if not isinstance(value, str):
+        raise AlertError(
+            f"metric: expected string, got {type(value).__name__}"
+        )
+    try:
+        return AlertMetric(value.lower())
+    except ValueError as exc:
+        raise AlertError(
+            f"metric: must be 'price' or 'sentiment' (got {value!r})"
+        ) from exc
+
+
+def _validate_sentiment_threshold(threshold: Decimal) -> None:
+    if threshold < SENTIMENT_THRESHOLD_MIN or threshold > SENTIMENT_THRESHOLD_MAX:
+        raise AlertError(
+            f"threshold: sentiment alerts require value in "
+            f"[{SENTIMENT_THRESHOLD_MIN}, {SENTIMENT_THRESHOLD_MAX}], "
+            f"got {threshold}"
+        )
+
+
+def _validate_window_days(window_days: int | None, *, required: bool) -> int | None:
+    if not required:
+        if window_days is not None:
+            raise AlertError(
+                "window_days: only valid for sentiment alerts"
+            )
+        return None
+    if window_days is None:
+        raise AlertError("window_days: required for sentiment alerts")
+    if (
+        window_days < SENTIMENT_WINDOW_MIN_DAYS
+        or window_days > SENTIMENT_WINDOW_MAX_DAYS
+    ):
+        raise AlertError(
+            f"window_days: must be in "
+            f"[{SENTIMENT_WINDOW_MIN_DAYS}, {SENTIMENT_WINDOW_MAX_DAYS}]"
+        )
+    return window_days
+
+
+def _compute_sentiment_for_asset(
+    session: Any, asset_id: int, window_days: int
+) -> Decimal | None:
+    """Rolling-mean compound score for one asset over the last ``window_days``.
+
+    Returns None when the window has zero scored articles — distinguishes
+    "no signal" from "signal of 0.0" so alert evaluation can skip rather
+    than misfire on a numerical neutral.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=window_days)
+    row = session.execute(
+        select(func.avg(Article.sentiment))
+        .join(ArticleAsset, ArticleAsset.article_id == Article.id)
+        .where(
+            ArticleAsset.asset_id == asset_id,
+            Article.published_at >= cutoff,
+            Article.sentiment.is_not(None),
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    return Decimal(str(float(row)))
 
 
 def _latest_point_by_asset(session: Any, asset_ids: list[int]) -> dict[int, PricePoint]:
@@ -113,17 +214,32 @@ def _latest_point_by_asset(session: Any, asset_ids: list[int]) -> dict[int, Pric
     return out
 
 
-def _is_crossed(direction: AlertDirection, close: Decimal, threshold: Decimal) -> bool:
+def _is_crossed(direction: AlertDirection, observed: Decimal, threshold: Decimal) -> bool:
+    """Generic crossing check — works for both price and sentiment metrics
+    since the directional semantics are identical (greater-equal / less-equal)."""
     if direction == AlertDirection.ABOVE:
-        return close >= threshold
-    return close <= threshold
+        return observed >= threshold
+    return observed <= threshold
 
 
 def _hydrate(
     alert: PriceAlert,
     asset: Asset,
     latest: PricePoint | None,
+    *,
+    current_value: Decimal | None = None,
 ) -> AlertOut:
+    """Build an ``AlertOut`` from the persisted row + caller-provided context.
+
+    ``current_value`` is the metric's most recent observed value (latest
+    close for price alerts, rolling-mean sentiment for sentiment alerts).
+    Defaults to the latest close so the field is always populated for
+    price alerts without a separate code path.
+    """
+    metric = AlertMetric(alert.metric) if alert.metric else AlertMetric.PRICE
+    last_price = latest.close if latest is not None else None
+    if current_value is None and metric == AlertMetric.PRICE:
+        current_value = last_price
     return AlertOut(
         id=alert.id,
         asset_id=alert.asset_id,
@@ -131,14 +247,35 @@ def _hydrate(
         asset_name=asset.name,
         threshold=alert.threshold,
         direction=alert.direction,
+        metric=metric,
+        window_days=alert.window_days,
         is_active=alert.is_active,
         triggered_at=alert.triggered_at,
         notified_at=alert.notified_at,
         note=alert.note,
         created_at=alert.created_at,
-        last_price=latest.close if latest is not None else None,
+        last_price=last_price,
         last_price_at=latest.timestamp if latest is not None else None,
+        current_value=current_value,
     )
+
+
+def _hydrate_with_metric_value(
+    session: Any, alert: PriceAlert, asset: Asset, latest: PricePoint | None
+) -> AlertOut:
+    """Hydrate path that fetches the sentiment current value when needed.
+
+    Used by the read endpoints — list/get/pending — so the UI can show
+    "current sentiment: -0.42" alongside the threshold without a second
+    round-trip.
+    """
+    metric = AlertMetric(alert.metric) if alert.metric else AlertMetric.PRICE
+    if metric != AlertMetric.SENTIMENT:
+        return _hydrate(alert, asset, latest)
+    if alert.window_days is None:  # pragma: no cover — schema invariant
+        return _hydrate(alert, asset, latest, current_value=None)
+    cv = _compute_sentiment_for_asset(session, asset.id, alert.window_days)
+    return _hydrate(alert, asset, latest, current_value=cv)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +298,10 @@ def list_alerts(
         asset_ids = list({int(r[1].id) for r in rows})
         latest = _latest_point_by_asset(s, asset_ids)
 
-        return [_hydrate(alert, asset, latest.get(asset.id)) for alert, asset in rows]
+        return [
+            _hydrate_with_metric_value(s, alert, asset, latest.get(asset.id))
+            for alert, asset in rows
+        ]
 
 
 def get_alert(alert_id: int) -> AlertOut:
@@ -175,7 +315,7 @@ def get_alert(alert_id: int) -> AlertOut:
             raise AlertNotFoundError(f"alert {alert_id} not found")
         alert, asset = row
         latest = _latest_point_by_asset(s, [asset.id]).get(asset.id)
-        return _hydrate(alert, asset, latest)
+        return _hydrate_with_metric_value(s, alert, asset, latest)
 
 
 def list_pending_notifications() -> list[AlertOut]:
@@ -194,7 +334,10 @@ def list_pending_notifications() -> list[AlertOut]:
         )
         asset_ids = list({int(r[1].id) for r in rows})
         latest = _latest_point_by_asset(s, asset_ids)
-        return [_hydrate(alert, asset, latest.get(asset.id)) for alert, asset in rows]
+        return [
+            _hydrate_with_metric_value(s, alert, asset, latest.get(asset.id))
+            for alert, asset in rows
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +351,17 @@ def create_alert(
     threshold: Any,
     direction: AlertDirection | str,
     note: str | None = None,
+    metric: AlertMetric | str | None = None,
+    window_days: int | None = None,
 ) -> AlertOut:
-    thr = _to_decimal(threshold, field="threshold")
+    metric_enum = _parse_metric(metric)
+    is_sentiment = metric_enum == AlertMetric.SENTIMENT
+    thr = _to_decimal(threshold, field="threshold", allow_negative=is_sentiment)
+    if is_sentiment:
+        _validate_sentiment_threshold(thr)
+    window_days_validated = _validate_window_days(
+        window_days, required=is_sentiment
+    )
     dir_enum = _parse_direction(direction)
     note_clean: str | None = None
     if note is not None:
@@ -227,13 +379,15 @@ def create_alert(
             asset_id=asset_id,
             threshold=thr,
             direction=dir_enum,
+            metric=metric_enum.value,
+            window_days=window_days_validated,
             is_active=True,
             note=note_clean,
         )
         s.add(alert)
         s.flush()
         latest = _latest_point_by_asset(s, [asset_id]).get(asset_id)
-        return _hydrate(alert, asset, latest)
+        return _hydrate_with_metric_value(s, alert, asset, latest)
 
 
 def update_alert(
@@ -265,7 +419,16 @@ def update_alert(
             raise AssetNotFoundError(f"asset {alert.asset_id} not found")
 
         if threshold is not None:
-            alert.threshold = _to_decimal(threshold, field="threshold")
+            metric_enum = (
+                AlertMetric(alert.metric) if alert.metric else AlertMetric.PRICE
+            )
+            is_sentiment = metric_enum == AlertMetric.SENTIMENT
+            new_thr = _to_decimal(
+                threshold, field="threshold", allow_negative=is_sentiment
+            )
+            if is_sentiment:
+                _validate_sentiment_threshold(new_thr)
+            alert.threshold = new_thr
         if direction is not None:
             alert.direction = _parse_direction(direction)
         if is_active is not None:
@@ -284,7 +447,7 @@ def update_alert(
 
         s.flush()
         latest = _latest_point_by_asset(s, [asset.id]).get(asset.id)
-        return _hydrate(alert, asset, latest)
+        return _hydrate_with_metric_value(s, alert, asset, latest)
 
 
 def delete_alert(alert_id: int) -> None:
@@ -318,7 +481,7 @@ def mark_notified(alert_id: int) -> AlertOut:
             alert.notified_at = now
             s.flush()
         latest = _latest_point_by_asset(s, [asset.id]).get(asset.id)
-        return _hydrate(alert, asset, latest)
+        return _hydrate_with_metric_value(s, alert, asset, latest)
 
 
 # ---------------------------------------------------------------------------
@@ -329,9 +492,16 @@ def mark_notified(alert_id: int) -> AlertOut:
 def check_alerts() -> int:
     """Scan active alerts for threshold crossings and stamp ``triggered_at``.
 
-    Returns the number of alerts newly fired by this pass. Safe to call
-    concurrently with CRUD writes — we only touch active+untriggered rows and
-    always re-check ``triggered_at`` inside the transaction.
+    Handles both metric types in one pass:
+    - Price alerts compare the latest close against the threshold.
+    - Sentiment alerts compute the rolling-mean compound score over the
+      alert's ``window_days`` and compare that against the threshold.
+      Sentiment alerts whose window has zero scored articles are
+      skipped (no signal → no firing).
+
+    Returns the number of alerts newly fired. Safe to call concurrently
+    with CRUD writes — we only touch active+untriggered rows and always
+    re-check ``triggered_at`` inside the transaction.
     """
     fired = 0
     with session_scope() as s:
@@ -346,19 +516,40 @@ def check_alerts() -> int:
         if not alerts:
             return 0
 
-        asset_ids = list({alert.asset_id for alert in alerts})
-        latest = _latest_point_by_asset(s, asset_ids)
+        # Pre-load latest prices for any price alerts in one batch — keeps
+        # the loop tight and lets sentiment alerts skip the lookup.
+        price_asset_ids = [
+            alert.asset_id
+            for alert in alerts
+            if (alert.metric or AlertMetric.PRICE.value) == AlertMetric.PRICE.value
+        ]
+        latest = _latest_point_by_asset(s, list(set(price_asset_ids)))
         now = datetime.now(UTC)
 
         for alert in alerts:
-            point = latest.get(alert.asset_id)
-            if point is None:
-                continue
             if alert.triggered_at is not None:  # defensive re-check
                 continue
-            if _is_crossed(alert.direction, point.close, alert.threshold):
-                alert.triggered_at = now
-                fired += 1
+            metric = (
+                AlertMetric(alert.metric) if alert.metric else AlertMetric.PRICE
+            )
+            if metric == AlertMetric.PRICE:
+                point = latest.get(alert.asset_id)
+                if point is None:
+                    continue
+                if _is_crossed(alert.direction, point.close, alert.threshold):
+                    alert.triggered_at = now
+                    fired += 1
+            else:  # AlertMetric.SENTIMENT
+                if alert.window_days is None:  # schema invariant; defensive
+                    continue
+                value = _compute_sentiment_for_asset(
+                    s, alert.asset_id, alert.window_days
+                )
+                if value is None:
+                    continue
+                if _is_crossed(alert.direction, value, alert.threshold):
+                    alert.triggered_at = now
+                    fired += 1
 
     if fired:
         logger.info("check_alerts: fired %d alerts", fired)

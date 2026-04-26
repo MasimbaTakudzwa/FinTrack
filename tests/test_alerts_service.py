@@ -7,8 +7,39 @@ from pathlib import Path
 import pytest
 
 from sidecar.db.engine import session_scope
-from sidecar.db.models import AlertDirection, Asset, AssetType, PriceAlert, PricePoint
+from sidecar.db.models import (
+    AlertDirection,
+    AlertMetric,
+    Article,
+    ArticleAsset,
+    Asset,
+    AssetType,
+    PriceAlert,
+    PricePoint,
+)
 from sidecar.services import alerts as svc
+
+
+def _add_article(
+    asset_id: int,
+    *,
+    sentiment: float | None,
+    headline: str = "x",
+    days_ago: int = 0,
+    url: str | None = None,
+) -> int:
+    with session_scope() as s:
+        article = Article(
+            url=url or f"https://test/{asset_id}/{datetime.now(UTC).timestamp()}/{sentiment}",
+            headline=headline,
+            source="Test",
+            published_at=datetime.now(UTC) - timedelta(days=days_ago),
+            sentiment=sentiment,
+        )
+        s.add(article)
+        s.flush()
+        s.add(ArticleAsset(article_id=article.id, asset_id=asset_id))
+        return article.id
 
 
 def _seed_asset(symbol: str = "AAPL", name: str = "Apple Inc.") -> int:
@@ -397,6 +428,210 @@ def test_mark_notified_is_idempotent(isolated_db: Path) -> None:
     assert second.notified_at.replace(tzinfo=None) == first.notified_at.replace(
         tzinfo=None
     )
+
+
+# ---------------------------------------------------------------------------
+# Sentiment alerts (Phase K)
+# ---------------------------------------------------------------------------
+
+
+def test_create_sentiment_alert_happy(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    a = svc.create_alert(
+        asset_id=aid,
+        threshold=Decimal("-0.3"),
+        direction="below",
+        metric="sentiment",
+        window_days=7,
+    )
+    assert a.metric == AlertMetric.SENTIMENT
+    assert a.window_days == 7
+    assert a.threshold == Decimal("-0.3")
+
+
+def test_create_sentiment_alert_requires_window_days(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    with pytest.raises(svc.AlertError) as exc:
+        svc.create_alert(
+            asset_id=aid,
+            threshold=Decimal("0.5"),
+            direction="above",
+            metric="sentiment",
+        )
+    assert "window_days" in str(exc.value).lower()
+
+
+def test_create_price_alert_rejects_window_days(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    with pytest.raises(svc.AlertError) as exc:
+        svc.create_alert(
+            asset_id=aid,
+            threshold=Decimal("100"),
+            direction="above",
+            metric="price",
+            window_days=7,
+        )
+    assert "window_days" in str(exc.value).lower()
+
+
+def test_create_sentiment_alert_threshold_must_be_in_range(
+    isolated_db: Path,
+) -> None:
+    aid = _seed_asset()
+    with pytest.raises(svc.AlertError):
+        svc.create_alert(
+            asset_id=aid,
+            threshold=Decimal("5"),  # outside [-1, +1]
+            direction="above",
+            metric="sentiment",
+            window_days=7,
+        )
+
+
+def test_create_sentiment_alert_window_days_bounds(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    # Below the minimum.
+    with pytest.raises(svc.AlertError):
+        svc.create_alert(
+            asset_id=aid,
+            threshold=Decimal("0.3"),
+            direction="above",
+            metric="sentiment",
+            window_days=0,
+        )
+    # Above the maximum.
+    with pytest.raises(svc.AlertError):
+        svc.create_alert(
+            asset_id=aid,
+            threshold=Decimal("0.3"),
+            direction="above",
+            metric="sentiment",
+            window_days=400,
+        )
+
+
+def test_unknown_metric_rejected(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    with pytest.raises(svc.AlertError):
+        svc.create_alert(
+            asset_id=aid,
+            threshold=Decimal("0.3"),
+            direction="above",
+            metric="volatility",  # not a known metric
+        )
+
+
+def test_check_alerts_sentiment_fires_below(isolated_db: Path) -> None:
+    """7-day rolling mean of two articles at -0.5 each crosses a -0.3
+    threshold from below; alert fires."""
+    aid = _seed_asset()
+    _add_article(aid, sentiment=-0.5, headline="bad")
+    _add_article(aid, sentiment=-0.5, headline="bad", url="https://test/2")
+    a = svc.create_alert(
+        asset_id=aid,
+        threshold=Decimal("-0.3"),
+        direction="below",
+        metric="sentiment",
+        window_days=7,
+    )
+    fired = svc.check_alerts()
+    assert fired == 1
+    refreshed = svc.get_alert(a.id)
+    assert refreshed.triggered_at is not None
+    assert refreshed.current_value is not None
+    assert refreshed.current_value <= Decimal("-0.3")
+
+
+def test_check_alerts_sentiment_does_not_fire_when_above(
+    isolated_db: Path,
+) -> None:
+    aid = _seed_asset()
+    _add_article(aid, sentiment=0.6, headline="good")
+    _add_article(aid, sentiment=0.4, headline="good", url="https://test/2")
+    svc.create_alert(
+        asset_id=aid,
+        threshold=Decimal("-0.3"),
+        direction="below",
+        metric="sentiment",
+        window_days=7,
+    )
+    assert svc.check_alerts() == 0
+
+
+def test_check_alerts_sentiment_skips_when_no_articles_in_window(
+    isolated_db: Path,
+) -> None:
+    """Sentiment alert with zero scored articles in window → no signal,
+    no firing (rather than misfire on a synthetic 0)."""
+    aid = _seed_asset()
+    # Article exists but is older than window_days=7.
+    _add_article(aid, sentiment=-0.5, days_ago=30)
+    svc.create_alert(
+        asset_id=aid,
+        threshold=Decimal("-0.3"),
+        direction="below",
+        metric="sentiment",
+        window_days=7,
+    )
+    assert svc.check_alerts() == 0
+
+
+def test_check_alerts_sentiment_excludes_unscored_articles(
+    isolated_db: Path,
+) -> None:
+    """An unscored article shouldn't drag the rolling mean toward zero."""
+    aid = _seed_asset()
+    _add_article(aid, sentiment=-0.5)
+    _add_article(aid, sentiment=None, url="https://test/unscored")  # excluded
+    svc.create_alert(
+        asset_id=aid,
+        threshold=Decimal("-0.3"),
+        direction="below",
+        metric="sentiment",
+        window_days=7,
+    )
+    # With only the -0.5 article counting, the mean is -0.5 → fires.
+    assert svc.check_alerts() == 1
+
+
+def test_check_alerts_mixed_metrics_in_one_pass(isolated_db: Path) -> None:
+    """check_alerts handles price and sentiment alerts side-by-side."""
+    aid = _seed_asset()
+    _add_price(aid, Decimal("200"))
+    _add_article(aid, sentiment=-0.5)
+    _add_article(aid, sentiment=-0.5, url="https://test/2")
+    svc.create_alert(
+        asset_id=aid, threshold=Decimal("150"), direction="above"
+    )  # price → fires
+    svc.create_alert(
+        asset_id=aid,
+        threshold=Decimal("-0.3"),
+        direction="below",
+        metric="sentiment",
+        window_days=7,
+    )  # sentiment → fires
+    assert svc.check_alerts() == 2
+
+
+def test_list_alerts_hydrates_current_value_for_sentiment(
+    isolated_db: Path,
+) -> None:
+    aid = _seed_asset()
+    _add_article(aid, sentiment=0.5)
+    _add_article(aid, sentiment=0.5, url="https://test/2")
+    svc.create_alert(
+        asset_id=aid,
+        threshold=Decimal("0.4"),
+        direction="above",
+        metric="sentiment",
+        window_days=7,
+    )
+    listed = svc.list_alerts()
+    assert len(listed) == 1
+    assert listed[0].metric == AlertMetric.SENTIMENT
+    assert listed[0].current_value is not None
+    # Mean of two 0.5 scores = 0.5
+    assert abs(float(listed[0].current_value) - 0.5) < 1e-6
 
 
 def test_mark_notified_unknown_alert(isolated_db: Path) -> None:

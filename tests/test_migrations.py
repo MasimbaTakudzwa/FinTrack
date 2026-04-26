@@ -275,6 +275,9 @@ def test_upgrade_to_head_creates_price_alerts_table(tmp_path: Path) -> None:
             "notified_at",
             "note",
             "created_at",
+            # 0012 — sentiment-aware alerts
+            "metric",
+            "window_days",
         }
         assert expected <= cols, f"missing columns: {expected - cols}"
 

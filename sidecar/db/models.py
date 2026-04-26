@@ -36,6 +36,18 @@ class AlertDirection(StrEnum):
     BELOW = "below"
 
 
+class AlertMetric(StrEnum):
+    """Which signal an alert thresholds.
+
+    ``PRICE`` (default) — fires when the latest close crosses the threshold.
+    ``SENTIMENT`` — fires when the rolling-mean compound sentiment over
+    ``window_days`` crosses the threshold (range typically -1..+1).
+    """
+
+    PRICE = "price"
+    SENTIMENT = "sentiment"
+
+
 class Asset(Base):
     __tablename__ = "assets"
 
@@ -260,6 +272,16 @@ class PriceAlert(Base):
             values_callable=lambda e: [m.value for m in e],
         )
     )
+    # Which signal the alert thresholds — "price" (latest close) or
+    # "sentiment" (rolling-mean compound score over ``window_days``).
+    # Stored as a free-form String rather than SQLEnum so adding a third
+    # metric (volatility, volume, …) is a no-migration change.
+    metric: Mapped[str] = mapped_column(
+        String(32), default="price", server_default="price"
+    )
+    # Rolling-window length in days — only meaningful for sentiment
+    # alerts. NULL for price alerts.
+    window_days: Mapped[int | None] = mapped_column(nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     triggered_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

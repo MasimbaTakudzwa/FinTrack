@@ -41,6 +41,7 @@ router = APIRouter(prefix="/api/alerts", tags=["alerts"])
 
 
 AlertDirectionLiteral = Literal["above", "below"]
+AlertMetricLiteral = Literal["price", "sentiment"]
 
 
 class AlertOutModel(BaseModel):
@@ -50,6 +51,8 @@ class AlertOutModel(BaseModel):
     asset_name: str
     threshold: Decimal
     direction: AlertDirectionLiteral
+    metric: AlertMetricLiteral
+    window_days: int | None
     is_active: bool
     triggered_at: datetime | None
     notified_at: datetime | None
@@ -57,6 +60,9 @@ class AlertOutModel(BaseModel):
     created_at: datetime
     last_price: Decimal | None
     last_price_at: datetime | None
+    # Most recent observed value for the alert's metric — latest close
+    # for price alerts, rolling-mean sentiment for sentiment alerts.
+    current_value: Decimal | None
 
 
 class AlertListOut(BaseModel):
@@ -65,14 +71,22 @@ class AlertListOut(BaseModel):
 
 
 class CreateAlertIn(BaseModel):
+    """Threshold validation is intentionally loose at the schema level
+    (no ``gt=0``) — sentiment thresholds can be in [-1, 0]. The service
+    layer enforces metric-specific bounds (``> 0`` for price, [-1, +1]
+    for sentiment) so the API surfaces 400 instead of a half-clear 422.
+    """
+
     asset_id: int
-    threshold: Decimal = Field(gt=0)
+    threshold: Decimal
     direction: AlertDirectionLiteral
     note: str | None = Field(default=None, max_length=256)
+    metric: AlertMetricLiteral = "price"
+    window_days: int | None = Field(default=None, ge=1, le=365)
 
 
 class UpdateAlertIn(BaseModel):
-    threshold: Decimal | None = Field(default=None, gt=0)
+    threshold: Decimal | None = None
     direction: AlertDirectionLiteral | None = None
     is_active: bool | None = None
     note: str | None = Field(default=None, max_length=256)
@@ -94,6 +108,8 @@ def _to_model(a: AlertOut) -> AlertOutModel:
         asset_name=a.asset_name,
         threshold=a.threshold,
         direction=a.direction.value,
+        metric=a.metric.value,
+        window_days=a.window_days,
         is_active=a.is_active,
         triggered_at=a.triggered_at,
         notified_at=a.notified_at,
@@ -101,6 +117,7 @@ def _to_model(a: AlertOut) -> AlertOutModel:
         created_at=a.created_at,
         last_price=a.last_price,
         last_price_at=a.last_price_at,
+        current_value=a.current_value,
     )
 
 
@@ -133,6 +150,8 @@ def create_alert_route(body: CreateAlertIn) -> AlertOutModel:
                 threshold=body.threshold,
                 direction=body.direction,
                 note=body.note,
+                metric=body.metric,
+                window_days=body.window_days,
             )
         )
     except AssetNotFoundError as exc:

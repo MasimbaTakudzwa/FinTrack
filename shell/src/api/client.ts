@@ -598,6 +598,7 @@ export function reorderWatchlistItems(
 // ---------- Price Alerts ----------
 
 export type AlertDirection = "above" | "below";
+export type AlertMetric = "price" | "sentiment";
 
 export interface PriceAlert {
   id: number;
@@ -606,6 +607,11 @@ export interface PriceAlert {
   asset_name: string;
   threshold: string; // Decimal-as-string
   direction: AlertDirection;
+  /** Which signal the alert thresholds. "price" → latest close;
+   *  "sentiment" → rolling-mean compound score over `window_days`. */
+  metric: AlertMetric;
+  /** Rolling-window length in days for sentiment alerts. Null otherwise. */
+  window_days: number | null;
   is_active: boolean;
   triggered_at: string | null; // ISO 8601 or null
   notified_at: string | null;
@@ -613,6 +619,9 @@ export interface PriceAlert {
   created_at: string;
   last_price: string | null; // Decimal-as-string, null if no bars yet
   last_price_at: string | null;
+  /** The metric's most recent observed value (latest close for price
+   *  alerts, rolling-mean sentiment for sentiment alerts). */
+  current_value: string | null;
 }
 
 export interface AlertList {
@@ -654,6 +663,10 @@ export interface CreateAlertBody {
   threshold: string | number;
   direction: AlertDirection;
   note?: string | null;
+  /** Default "price". Set to "sentiment" + provide `window_days` to
+   *  fire on rolling-mean sentiment crossings instead of price ones. */
+  metric?: AlertMetric;
+  window_days?: number | null;
 }
 
 export function createAlert(
