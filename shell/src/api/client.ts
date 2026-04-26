@@ -809,6 +809,43 @@ export function getForecastAccuracy(
   );
 }
 
+export interface VolatilityReport {
+  symbol: string;
+  lookback_days: number;
+  returns_used: int;
+  last_close: number | null;
+  last_close_date: string | null; // YYYY-MM-DD
+  /** Daily realized vol — decimal proportion (0.012 == 1.2%). */
+  realized_vol_daily: number | null;
+  /** Annualised realized vol (daily × sqrt(252)). */
+  realized_vol_annualized: number | null;
+  /** EWMA next-day forecast vol — decimal proportion. */
+  ewma_next_day_vol: number | null;
+  /** ±1σ price-space band for the next trading day. */
+  expected_move_low: number | null;
+  expected_move_high: number | null;
+}
+
+// TS doesn't have a built-in `int`; alias to number so the field reads
+// closer to the wire schema.
+type int = number;
+
+/** Realized + EWMA-forecast volatility for a single asset. Drives the
+ *  "Risk profile" panel on AssetDetail. Returns metrics as decimal
+ *  proportions; UI formats as percentages. */
+export function getVolatility(
+  symbol: string,
+  opts: { lookbackDays?: number; signal?: AbortSignal } = {},
+): Promise<VolatilityReport> {
+  return apiGet<VolatilityReport>(
+    `/api/forecast/${encodeURIComponent(symbol)}/volatility/`,
+    {
+      params: { lookback_days: opts.lookbackDays ?? 30 },
+      signal: opts.signal,
+    },
+  );
+}
+
 // ---------- Analytics ----------
 
 export interface CorrelationCell {

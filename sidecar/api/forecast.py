@@ -54,6 +54,7 @@ from ml.persistence import (
     delete_forecast,
     load_forecast_by_symbol,
 )
+from ml.volatility import VolatilityReport, compute_volatility
 
 router = APIRouter(prefix="/api/forecast", tags=["forecast"])
 
@@ -141,6 +142,27 @@ class AccuracyReportModel(BaseModel):
     per_engine: list[EngineAccuracyModel]
     overall: EngineAccuracyModel | None
     actuals_available: int
+
+
+class VolatilityReportModel(BaseModel):
+    """Wire shape for ``ml.volatility.VolatilityReport``.
+
+    All ``*_vol`` numbers are decimal proportions (0.025 == 2.5%). The
+    UI multiplies by 100 for display. ``expected_move_low/high`` are the
+    next-day ±1sigma band in price space, computed from
+    ``ewma_next_day_vol``  *  ``last_close``.
+    """
+
+    symbol: str
+    lookback_days: int
+    returns_used: int
+    last_close: float | None
+    last_close_date: date | None
+    realized_vol_daily: float | None
+    realized_vol_annualized: float | None
+    ewma_next_day_vol: float | None
+    expected_move_low: float | None
+    expected_move_high: float | None
 
 
 # ---------------------------------------------------------------------------
@@ -402,3 +424,38 @@ def get_forecast_accuracy(
     """
     report = compute_accuracy(symbol, days=days)
     return _accuracy_to_model(report)
+
+
+def _volatility_to_model(report: VolatilityReport) -> VolatilityReportModel:
+    return VolatilityReportModel(
+        symbol=report.symbol,
+        lookback_days=report.lookback_days,
+        returns_used=report.returns_used,
+        last_close=report.last_close,
+        last_close_date=report.last_close_date,
+        realized_vol_daily=report.realized_vol_daily,
+        realized_vol_annualized=report.realized_vol_annualized,
+        ewma_next_day_vol=report.ewma_next_day_vol,
+        expected_move_low=report.expected_move_low,
+        expected_move_high=report.expected_move_high,
+    )
+
+
+@router.get("/{symbol}/volatility/", response_model=VolatilityReportModel)
+def get_volatility(
+    symbol: str,
+    lookback_days: Annotated[int, Query(ge=7, le=365)] = 30,
+) -> VolatilityReportModel:
+    """Realized + EWMA-forecast volatility for ``symbol``.
+
+    Returns daily + annualized realized vol, the EWMA next-day forecast,
+    and a price-space ±1sigma band centred on the last close. All metrics
+    are ``None`` when the asset doesn't have at least
+    ``MIN_RETURNS_FOR_VOL`` daily-bar returns inside the window — UI
+    hides the panel rather than showing zeros.
+
+    No 404 — unknown symbols return an empty report (parallel to the
+    accuracy endpoint) so the UI keeps a single render path.
+    """
+    report = compute_volatility(symbol, lookback_days=lookback_days)
+    return _volatility_to_model(report)

@@ -36,4 +36,5 @@ __all__ = [
     "jobs",
     "persistence",
     "sentiment",
+    "volatility",
 ]

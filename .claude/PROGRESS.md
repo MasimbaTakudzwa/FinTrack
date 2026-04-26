@@ -136,6 +136,22 @@ User pivoted: "stop thinking about shipping small patches and functionality. I r
 
 **Verifications (Phase F)**: `pytest` **430/430 green** (+24 over Phase E's 406), `ruff check .` clean, `mypy --strict sidecar/ ml/` clean on 51 files, `pnpm -C shell lint` clean, `pnpm -C shell build` clean (**607 kB JS / 184 kB gzipped** — up from 601/182 with the heatmap + lookback picker).
 
+**Phase G — Volatility analytics** (post-spec, completes the price + uncertainty story):
+
+- New `ml/volatility.py` (~230 LOC) — pure-arithmetic stdlib-only module:
+  - `_log_returns(closes)` — date-sorted close series → log-return list. First day skipped, non-positive prices guarded against.
+  - `_stdev(values)` — Bessel-corrected sample stdev (n-1 denominator), 0.0 below n=2.
+  - `_ewma_volatility(returns, lam=0.94)` — RiskMetrics-style next-period recurrence `sigma^2_t = lambda * sigma^2_{t-1} + (1-lambda) * r^2_{t-1}`. Seeded with sample variance to avoid early-period underestimation.
+  - `compute_volatility(symbol, lookback_days=30)` returns a `VolatilityReport` containing daily realized vol + annualized realized vol (× sqrt(252)) + EWMA next-day forecast + ±1σ price-space band centred on `last_close`. All metrics return `None` when the series has fewer than `MIN_RETURNS_FOR_VOL = 5` returns inside the window.
+  - GARCH explicitly considered + skipped: `arch` library would add ~5 MB of transitive deps for a few-percent accuracy improvement on most series. EWMA is within noise on the "what's tomorrow's expected ±σ?" use case. Public `compute_*` surface stays stable so a future GARCH swap is local to one file.
+- New `GET /api/forecast/{symbol}/volatility/?lookback_days=N` endpoint. Days clamped 7–365. Unknown symbols return an empty report (parallel to the accuracy endpoint) so the UI keeps a single render path.
+- New shell types `VolatilityReport` + `getVolatility(symbol, {lookbackDays})` helper. New `VolatilityPanel` component on AssetDetail rendered alongside `ForecastAccuracyPanel` in a 2-col grid above the existing Stats / Alerts / LatestBar row. Headline shows annualized vol prominently; secondary cards show daily vol; expected next-day move is rendered as a price-space `$X – $Y (±Z%)` band tinted amber.
+- **Tests** (21 new, total **451**):
+  - `test_ml_volatility.py` (17): log_returns drops first day / skips non-positive / empty inputs, stdev known values / too-short / constant series → 0, EWMA too-short → 0 / picks up recent burst (shocked > calm × 2) / matches stdev for IID, RISKMETRICS_LAMBDA pinned at 0.94, compute_volatility unknown-symbol / too-few-returns / constant-walk / steady-walk / annualization × sqrt(252) / band-centred-on-last-close / lookback-clip.
+  - `test_api_forecast.py` (+4): unknown symbol → empty report, too-few-bars → partial (last_close populated, metrics None), with-history happy + annualization sanity, days validation.
+
+**Verifications (Phase G)**: `pytest` **451/451 green** (+21 over Phase F's 430), `ruff check .` clean, `mypy --strict sidecar/ ml/` clean on 52 files, `pnpm -C shell lint` clean, `pnpm -C shell build` clean (**610 kB JS / 184 kB gzipped** — up from 607/184 with the new VolatilityPanel + client helper).
+
 ### What was just completed (checkpoint 24 — bundle pipeline hardened + branch audit verified)
 User flagged two follow-ups after the v0.2.0 rebase: (a) re-audit the remaining branches now that `git log --cherry-mark` could be run against reconciled main, and (b) fix the silent-bundle-of-stale-sidecar footgun that surfaced when the freshly-rebuilt `.app` was reporting v0.2.0 but `/api/assets/search/` returned 404 because Tauri had bundled a sidecar from before the search route landed.
 

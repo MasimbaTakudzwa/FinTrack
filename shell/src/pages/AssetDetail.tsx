@@ -36,6 +36,7 @@ import { CandleChart } from "../components/CandleChart";
 import { ForecastAccuracyPanel } from "../components/ForecastAccuracyPanel";
 import { NewsList } from "../components/NewsList";
 import { SentimentSummaryPanel } from "../components/SentimentSummaryPanel";
+import { VolatilityPanel } from "../components/VolatilityPanel";
 import { useResolvedTheme } from "../stores/useSettings";
 
 interface State {
@@ -555,7 +556,13 @@ function AssetBody({
 
       <PerformancePanel allPoints={series.points} />
 
-      <ForecastAccuracyPanel symbol={asset.symbol} refreshTick={fcRetrainTick} />
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <ForecastAccuracyPanel
+          symbol={asset.symbol}
+          refreshTick={fcRetrainTick}
+        />
+        <VolatilityPanel symbol={asset.symbol} />
+      </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <StatsPanel points={visiblePoints} tfTitle={tf.title} last={last} />

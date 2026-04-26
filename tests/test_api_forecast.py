@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -426,6 +427,88 @@ def test_accuracy_days_validation(isolated_db: Path) -> None:
         assert (
             client.get(
                 "/api/forecast/AAPL/accuracy/", params={"days": 999}
+            ).status_code
+            == 422
+        )
+
+
+# ---------------------------------------------------------------------------
+# Volatility endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_volatility_unknown_symbol_returns_empty_report(isolated_db: Path) -> None:
+    """Parallel to the accuracy endpoint — unknown symbols don't 404; they
+    return an empty report so the UI can hide the panel without a
+    separate error branch."""
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/NOPE/volatility/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["symbol"] == "NOPE"
+        assert body["returns_used"] == 0
+        assert body["realized_vol_daily"] is None
+        assert body["realized_vol_annualized"] is None
+        assert body["ewma_next_day_vol"] is None
+
+
+def test_volatility_too_few_bars_returns_partial(isolated_db: Path) -> None:
+    """Asset has only a couple of daily bars → metrics are None but
+    last_close is surfaced.
+
+    Seed with a start date close to today so the bars fall inside the
+    default 30-day lookback window — ``_seed_asset_with_daily_closes``
+    anchors at 2024-01-01, which is fine for accuracy tests (which
+    compute over the full snapshot history) but stale for any
+    last-N-days computation.
+    """
+    _seed_asset_with_daily_closes(
+        "AAPL", n_rows=2, start=date.today() - timedelta(days=2)
+    )
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/AAPL/volatility/")
+        assert resp.status_code == 200
+        body = resp.json()
+        # 2 closes → 1 return → below MIN_RETURNS_FOR_VOL.
+        assert body["realized_vol_daily"] is None
+        assert body["last_close"] is not None
+
+
+def test_volatility_with_history_returns_metrics(isolated_db: Path) -> None:
+    """Plenty of history inside the default lookback → all metrics
+    populated, with a sanity check on the annualization relationship."""
+    _seed_asset_with_daily_closes(
+        "AAPL", n_rows=80, start=date.today() - timedelta(days=80)
+    )
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/AAPL/volatility/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["returns_used"] >= 5
+        assert body["last_close"] is not None
+        assert body["realized_vol_daily"] is not None
+        assert body["realized_vol_annualized"] is not None
+        assert body["ewma_next_day_vol"] is not None
+        # Annualization relationship.
+        assert body["realized_vol_annualized"] == pytest.approx(
+            body["realized_vol_daily"] * (252 ** 0.5), rel=1e-6
+        )
+        # Expected-move band is centred on last_close.
+        midpoint = (body["expected_move_low"] + body["expected_move_high"]) / 2
+        assert midpoint == pytest.approx(body["last_close"], abs=1e-6)
+
+
+def test_volatility_lookback_validation(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        assert (
+            client.get(
+                "/api/forecast/AAPL/volatility/", params={"lookback_days": 1}
+            ).status_code
+            == 422
+        )
+        assert (
+            client.get(
+                "/api/forecast/AAPL/volatility/", params={"lookback_days": 9999}
             ).status_code
             == 422
         )
