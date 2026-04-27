@@ -4,6 +4,7 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   Briefcase,
+  Download,
   Loader2,
   Plus,
   RefreshCw,
@@ -15,6 +16,7 @@ import {
   type PortfolioSummary,
   type PortfolioTransaction,
   deletePortfolioTransaction,
+  exportPortfolioTransactionsCsv,
   getPortfolioSummary,
   listAssets,
   listPortfolioPositions,
@@ -121,6 +123,29 @@ export function Portfolio() {
     }
   };
 
+  const onExportCsv = async () => {
+    try {
+      const { blob, filename } = await exportPortfolioTransactionsCsv();
+      // Click-an-anchor download — works in Tauri's webviews where
+      // Content-Disposition: attachment doesn't auto-trigger a save.
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Defer revocation so Safari/WKWebView has time to grab the blob
+      // before it's garbage-collected.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      setState((s) => ({
+        ...s,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+  };
+
   return (
     <div className="p-6">
       <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
@@ -134,6 +159,20 @@ export function Portfolio() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onExportCsv}
+            disabled={state.transactions.length === 0}
+            title={
+              state.transactions.length === 0
+                ? "No transactions to export"
+                : "Download all transactions as CSV"
+            }
+            className="inline-flex items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Export CSV
+          </button>
           <button
             type="button"
             onClick={refresh}

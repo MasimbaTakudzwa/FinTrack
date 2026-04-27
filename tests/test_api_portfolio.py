@@ -297,3 +297,74 @@ def test_performance_lookback_validation(isolated_db: Path) -> None:
             ).status_code
             == 422
         )
+
+
+# ---------------------------------------------------------------------------
+# CSV export
+# ---------------------------------------------------------------------------
+
+
+def test_export_csv_empty_returns_header_only(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.get("/api/portfolio/transactions/export.csv")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/csv")
+        assert "attachment" in resp.headers["content-disposition"]
+        text = resp.text
+        # Header row only.
+        assert text.startswith("transaction_date,symbol,transaction_type")
+        assert text.strip().count("\n") == 0  # only one line — the header
+
+
+def test_export_csv_includes_transactions(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    with TestClient(app) as client:
+        client.post(
+            "/api/portfolio/transactions/",
+            json={
+                "asset_id": aid,
+                "transaction_type": "buy",
+                "quantity": "10",
+                "price_per_unit": "150",
+                "transaction_date": "2026-04-01",
+                "fee": "1.5",
+                "notes": "broker test",
+            },
+        )
+        client.post(
+            "/api/portfolio/transactions/",
+            json={
+                "asset_id": aid,
+                "transaction_type": "sell",
+                "quantity": "5",
+                "price_per_unit": "160",
+                "transaction_date": "2026-04-15",
+            },
+        )
+
+        resp = client.get("/api/portfolio/transactions/export.csv")
+        assert resp.status_code == 200
+        rows = resp.text.strip().splitlines()
+        assert rows[0] == (
+            "transaction_date,symbol,transaction_type,quantity,"
+            "price_per_unit,fee,notes"
+        )
+        # 1 header + 2 rows
+        assert len(rows) == 3
+        # Newest-first order from list_transactions matches the CSV row order.
+        assert "2026-04-15" in rows[1]
+        assert "sell" in rows[1]
+        assert "2026-04-01" in rows[2]
+        assert "broker test" in rows[2]
+
+
+def test_export_csv_filename_has_today(isolated_db: Path) -> None:
+    """Content-Disposition includes a YYYYMMDD-stamped filename so users
+    can download multiple snapshots without overwriting."""
+    with TestClient(app) as client:
+        resp = client.get("/api/portfolio/transactions/export.csv")
+        # ``today`` here is the test runner's local date — just check the
+        # general shape.
+        cd = resp.headers["content-disposition"]
+        assert "fintrack-transactions-" in cd
+        assert ".csv" in cd

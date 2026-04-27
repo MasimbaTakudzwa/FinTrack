@@ -12,11 +12,14 @@ Error mapping:
 
 from __future__ import annotations
 
+import csv
+import io
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from sidecar.services.portfolio import (
@@ -156,6 +159,58 @@ def list_transactions_route(
     txns = list_transactions(asset_id=asset_id)
     return TransactionListOut(
         count=len(txns), transactions=[_txn_to_model(t) for t in txns]
+    )
+
+
+@router.get("/transactions/export.csv")
+def export_transactions_csv() -> StreamingResponse:
+    """Stream every transaction as CSV for backup / audit.
+
+    Columns chosen for round-trip compatibility with a future ``import``
+    endpoint: ``transaction_date, symbol, transaction_type, quantity,
+    price_per_unit, fee, notes``. The ``id`` and ``created_at`` columns
+    are omitted because they're regenerated on import (``id`` is a
+    fresh PK; ``created_at`` is set at insert time).
+
+    Empty portfolio still returns the header row so the file is
+    well-formed and consumers don't have to special-case zero rows.
+    """
+    txns = list_transactions()
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(
+        [
+            "transaction_date",
+            "symbol",
+            "transaction_type",
+            "quantity",
+            "price_per_unit",
+            "fee",
+            "notes",
+        ]
+    )
+    for t in txns:
+        writer.writerow(
+            [
+                t.transaction_date.isoformat(),
+                t.symbol,
+                t.transaction_type.value,
+                # Decimals serialise via str() which gives a clean
+                # canonical form (no scientific notation at our scale).
+                str(t.quantity),
+                str(t.price_per_unit),
+                str(t.fee),
+                t.notes or "",
+            ]
+        )
+    body = buffer.getvalue()
+
+    filename = f"fintrack-transactions-{datetime.now().strftime('%Y%m%d')}.csv"
+    return StreamingResponse(
+        iter([body]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

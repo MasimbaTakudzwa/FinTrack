@@ -822,6 +822,33 @@ export function getPortfolioPerformance(
   });
 }
 
+/**
+ * Fetch the transactions-export CSV as a Blob. Caller is responsible
+ * for triggering the browser download via an anchor + URL.createObjectURL
+ * — Tauri's WebView2/WKWebView don't auto-handle Content-Disposition
+ * attachments the way a stock browser does.
+ */
+export async function exportPortfolioTransactionsCsv(
+  signal?: AbortSignal,
+): Promise<{ blob: Blob; filename: string }> {
+  const base = await getBaseUrl();
+  const url = `${base}/api/portfolio/transactions/export.csv`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    throw new ApiError(res.status, url, `GET ${url} → HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  // Pull the server-suggested filename out of Content-Disposition;
+  // fall back to a sensible default if the header isn't surfaced
+  // (some webviews strip it).
+  const cd = res.headers.get("content-disposition") ?? "";
+  const match = cd.match(/filename="([^"]+)"/);
+  const filename =
+    match?.[1] ??
+    `fintrack-transactions-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.csv`;
+  return { blob, filename };
+}
+
 // ---------- Forecast ----------
 
 /** Server-supported engines. Stays as a literal union here so the UI can
