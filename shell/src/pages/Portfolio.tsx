@@ -6,6 +6,7 @@ import {
   Briefcase,
   Download,
   Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   Trash2,
@@ -62,6 +63,7 @@ export function Portfolio() {
   const [tick, setTick] = useState(0);
   const [addOpen, setAddOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [editing, setEditing] = useState<PortfolioTransaction | null>(null);
   const [pendingDelete, setPendingDelete] = useState<PortfolioTransaction | null>(
     null,
   );
@@ -267,6 +269,7 @@ export function Portfolio() {
         <TransactionsTable
           transactions={state.transactions}
           loading={state.loading}
+          onEdit={(t) => setEditing(t)}
           onDelete={(t) => setPendingDelete(t)}
         />
       )}
@@ -276,6 +279,18 @@ export function Portfolio() {
           assets={state.assets}
           onClose={() => setAddOpen(false)}
           onCreated={onTransactionAdded}
+        />
+      )}
+
+      {editing && (
+        <TransactionAddModal
+          assets={state.assets}
+          editing={editing}
+          onClose={() => setEditing(null)}
+          onCreated={() => {
+            setEditing(null);
+            refresh();
+          }}
         />
       )}
 
@@ -547,10 +562,12 @@ function PositionRow({ p }: { p: PortfolioPosition }) {
 function TransactionsTable({
   transactions,
   loading,
+  onEdit,
   onDelete,
 }: {
   transactions: PortfolioTransaction[];
   loading: boolean;
+  onEdit: (t: PortfolioTransaction) => void;
   onDelete: (t: PortfolioTransaction) => void;
 }) {
   if (loading && transactions.length === 0) {
@@ -648,9 +665,17 @@ function TransactionsTable({
                 <td className="px-4 py-2 text-right">
                   <button
                     type="button"
+                    onClick={() => onEdit(t)}
+                    title="Edit transaction"
+                    className="rounded p-1 text-zinc-400 hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-950 dark:hover:text-indigo-400"
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => onDelete(t)}
                     title="Delete transaction"
-                    className="rounded p-1 text-zinc-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950 dark:hover:text-rose-400"
+                    className="ml-1 rounded p-1 text-zinc-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950 dark:hover:text-rose-400"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>

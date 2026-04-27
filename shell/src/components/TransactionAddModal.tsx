@@ -2,22 +2,31 @@ import { useEffect, useMemo, useState } from "react";
 import { Briefcase, X } from "lucide-react";
 import {
   type Asset,
+  type PortfolioTransaction,
   type TransactionType,
   createPortfolioTransaction,
+  updatePortfolioTransaction,
 } from "../api/client";
 
 interface Props {
   assets: Asset[];
   /** Optional default asset (e.g. "Buy AAPL" deep-link from AssetDetail). */
   defaultAssetId?: number;
+  /** When set, the modal opens in edit mode — fields are pre-filled from
+   *  this transaction and submit calls PUT instead of POST. The
+   *  asset_id is locked (we don't support reassigning a transaction
+   *  to a different asset; service-layer guard mirrors this). */
+  editing?: PortfolioTransaction;
   onClose: () => void;
   onCreated: () => void;
 }
 
 /**
- * Compact form for entering a buy/sell transaction. Drives the
- * portfolio-page entry path. The asset picker uses the existing
- * `assets` catalog passed in by the parent (no extra fetch).
+ * Compact form for entering or editing a buy/sell transaction.
+ *
+ * Used in two modes:
+ *   - Create (no `editing` prop) → POST /api/portfolio/transactions/
+ *   - Edit  (`editing={txn}`)   → PUT  /api/portfolio/transactions/{id}/
  *
  * Validation is light on the client side — service layer is the source
  * of truth for "quantity must be > 0", "asset must exist", etc. — so
@@ -27,6 +36,7 @@ interface Props {
 export function TransactionAddModal({
   assets,
   defaultAssetId,
+  editing,
   onClose,
   onCreated,
 }: Props) {
@@ -35,14 +45,16 @@ export function TransactionAddModal({
     [assets],
   );
   const [assetId, setAssetId] = useState<number | "">(
-    defaultAssetId ?? sortedAssets[0]?.id ?? "",
+    editing?.asset_id ?? defaultAssetId ?? sortedAssets[0]?.id ?? "",
   );
-  const [type, setType] = useState<TransactionType>("buy");
-  const [quantity, setQuantity] = useState("");
-  const [price, setPrice] = useState("");
-  const [fee, setFee] = useState("0");
-  const [date, setDate] = useState(today());
-  const [notes, setNotes] = useState("");
+  const [type, setType] = useState<TransactionType>(
+    editing?.transaction_type ?? "buy",
+  );
+  const [quantity, setQuantity] = useState(editing?.quantity ?? "");
+  const [price, setPrice] = useState(editing?.price_per_unit ?? "");
+  const [fee, setFee] = useState(editing?.fee ?? "0");
+  const [date, setDate] = useState(editing?.transaction_date ?? today());
+  const [notes, setNotes] = useState(editing?.notes ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -69,15 +81,26 @@ export function TransactionAddModal({
     setSubmitting(true);
     setError(null);
     const trimmedNotes = notes.trim();
-    createPortfolioTransaction({
-      asset_id: assetId,
-      transaction_type: type,
-      quantity: quantity.trim(),
-      price_per_unit: price.trim(),
-      transaction_date: date,
-      fee: fee.trim() || "0",
-      notes: trimmedNotes === "" ? null : trimmedNotes,
-    })
+    const promise = editing
+      ? updatePortfolioTransaction(editing.id, {
+          // asset_id is locked — re-association isn't supported.
+          transaction_type: type,
+          quantity: quantity.trim(),
+          price_per_unit: price.trim(),
+          transaction_date: date,
+          fee: fee.trim() || "0",
+          notes: trimmedNotes === "" ? null : trimmedNotes,
+        })
+      : createPortfolioTransaction({
+          asset_id: assetId,
+          transaction_type: type,
+          quantity: quantity.trim(),
+          price_per_unit: price.trim(),
+          transaction_date: date,
+          fee: fee.trim() || "0",
+          notes: trimmedNotes === "" ? null : trimmedNotes,
+        });
+    promise
       .then(() => onCreated())
       .catch((err: unknown) => {
         setError(err instanceof Error ? err.message : String(err));
@@ -103,10 +126,12 @@ export function TransactionAddModal({
             </div>
             <div>
               <h2 className="text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
-                Record transaction
+                {editing ? `Edit ${editing.symbol} transaction` : "Record transaction"}
               </h2>
               <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                Buy or sell to update your portfolio P&amp;L.
+                {editing
+                  ? "Position state recomputes from the updated history."
+                  : "Buy or sell to update your portfolio P&L."}
               </p>
             </div>
           </div>
@@ -147,7 +172,13 @@ export function TransactionAddModal({
               onChange={(e) =>
                 setAssetId(e.target.value === "" ? "" : Number(e.target.value))
               }
-              className="block w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+              disabled={editing !== undefined}
+              title={
+                editing
+                  ? "Asset can't be reassigned — delete and re-add to move to a different ticker"
+                  : undefined
+              }
+              className="block w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
             >
               {sortedAssets.length === 0 && (
                 <option value="">No assets tracked</option>
@@ -242,7 +273,11 @@ export function TransactionAddModal({
             disabled={!canSubmit}
             className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
           >
-            {submitting ? "Saving…" : "Save"}
+            {submitting
+              ? "Saving…"
+              : editing
+                ? "Save changes"
+                : "Save"}
           </button>
         </div>
       </div>

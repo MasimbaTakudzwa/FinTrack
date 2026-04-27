@@ -310,6 +310,65 @@ def add_transaction(
         return _txn_to_out(txn, asset)
 
 
+def update_transaction(
+    transaction_id: int,
+    *,
+    transaction_type: TransactionType | str | None = None,
+    quantity: Any | None = None,
+    price_per_unit: Any | None = None,
+    transaction_date: date | None = None,
+    fee: Any | None = None,
+    notes: str | None = None,
+    update_notes: bool = False,
+) -> TransactionOut:
+    """Patch-style update of an existing transaction.
+
+    Only the fields explicitly passed are touched — same convention as
+    ``services.alerts.update_alert``. ``notes`` is gated by
+    ``update_notes`` so callers can pass ``notes=None`` to explicitly
+    clear the field versus leaving it alone.
+
+    Returns the hydrated post-update view. Doesn't allow changing
+    ``asset_id`` — the user can delete + re-add for that case (rare
+    enough that a separate parameter would just clutter the surface).
+    """
+    with session_scope() as s:
+        txn = s.get(PortfolioTransaction, transaction_id)
+        if txn is None:
+            raise TransactionNotFoundError(
+                f"transaction {transaction_id} not found"
+            )
+        asset = s.get(Asset, txn.asset_id)
+        if asset is None:  # pragma: no cover — FK cascade makes this unreachable
+            raise AssetNotFoundError(f"asset {txn.asset_id} not found")
+
+        if transaction_type is not None:
+            txn.transaction_type = _parse_transaction_type(
+                transaction_type
+            ).value
+        if quantity is not None:
+            txn.quantity = _to_decimal(quantity, field="quantity")
+        if price_per_unit is not None:
+            txn.price_per_unit = _to_decimal(
+                price_per_unit, field="price_per_unit"
+            )
+        if transaction_date is not None:
+            txn.transaction_date = transaction_date
+        if fee is not None:
+            txn.fee = _to_decimal(fee, field="fee", allow_zero=True)
+        if update_notes:
+            if notes is None:
+                txn.notes = None
+            else:
+                clean = notes.strip()
+                if len(clean) > 256:
+                    raise PortfolioError("notes: must be <= 256 chars")
+                txn.notes = clean or None
+
+        s.flush()
+        return _txn_to_out(txn, asset)
+
+
 def delete_transaction(transaction_id: int) -> None:
     with session_scope() as s:
         txn = s.get(PortfolioTransaction, transaction_id)

@@ -37,6 +37,7 @@ from sidecar.services.portfolio import (
     import_transactions_csv,
     list_positions,
     list_transactions,
+    update_transaction,
 )
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
@@ -80,6 +81,23 @@ class CreateTransactionIn(BaseModel):
     transaction_date: date
     fee: Decimal = Decimal("0")
     notes: str | None = Field(default=None, max_length=256)
+
+
+class UpdateTransactionIn(BaseModel):
+    """Patch-style update body. Every field optional — only the ones
+    the client sends are touched. ``notes`` is special: omitting the
+    key leaves it alone, but explicitly sending ``"notes": null``
+    clears it (Pydantic v2 ``model_fields_set`` is how the route
+    distinguishes those cases)."""
+
+    transaction_type: TransactionTypeLiteral | None = None
+    quantity: Decimal | None = None
+    price_per_unit: Decimal | None = None
+    transaction_date: date | None = None
+    fee: Decimal | None = None
+    notes: str | None = Field(default=None, max_length=256)
+
+    model_config = {"extra": "forbid"}
 
 
 class PositionOutModel(BaseModel):
@@ -291,6 +309,34 @@ def _import_result_to_model(r: ImportResult) -> ImportResultModel:
         skipped=r.skipped,
         errors=[ImportRowErrorModel(row=e.row, message=e.message) for e in r.errors],
     )
+
+
+@router.put(
+    "/transactions/{transaction_id}/", response_model=TransactionOutModel
+)
+def update_transaction_route(
+    transaction_id: int, body: UpdateTransactionIn
+) -> TransactionOutModel:
+    """Patch-style update. Same model_fields_set trick as the alerts
+    route to distinguish "notes omitted" from "notes=null"."""
+    sent_notes = "notes" in body.model_fields_set
+    try:
+        return _txn_to_model(
+            update_transaction(
+                transaction_id,
+                transaction_type=body.transaction_type,
+                quantity=body.quantity,
+                price_per_unit=body.price_per_unit,
+                transaction_date=body.transaction_date,
+                fee=body.fee,
+                notes=body.notes,
+                update_notes=sent_notes,
+            )
+        )
+    except TransactionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PortfolioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.delete("/transactions/{transaction_id}/", status_code=204)

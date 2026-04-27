@@ -185,6 +185,106 @@ def test_delete_transaction_404_when_missing(isolated_db: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# update_transaction
+# ---------------------------------------------------------------------------
+
+
+def test_update_transaction_changes_quantity_and_price(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    t = svc.add_transaction(
+        asset_id=aid,
+        transaction_type="buy",
+        quantity=Decimal("10"),
+        price_per_unit=Decimal("100"),
+        transaction_date=date(2026, 4, 1),
+    )
+    updated = svc.update_transaction(
+        t.id,
+        quantity=Decimal("12"),
+        price_per_unit=Decimal("105"),
+    )
+    assert updated.quantity == Decimal("12")
+    assert updated.price_per_unit == Decimal("105")
+    # Unchanged fields preserved.
+    assert updated.transaction_date == date(2026, 4, 1)
+    assert updated.transaction_type == TransactionType.BUY
+
+
+def test_update_transaction_change_type(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    t = svc.add_transaction(
+        asset_id=aid,
+        transaction_type="buy",
+        quantity=Decimal("10"),
+        price_per_unit=Decimal("100"),
+        transaction_date=date(2026, 4, 1),
+    )
+    updated = svc.update_transaction(t.id, transaction_type="sell")
+    assert updated.transaction_type == TransactionType.SELL
+
+
+def test_update_transaction_clears_notes(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    t = svc.add_transaction(
+        asset_id=aid,
+        transaction_type="buy",
+        quantity=Decimal("1"),
+        price_per_unit=Decimal("100"),
+        transaction_date=date(2026, 4, 1),
+        notes="initial note",
+    )
+    cleared = svc.update_transaction(t.id, notes=None, update_notes=True)
+    assert cleared.notes is None
+    # Without update_notes, omitting notes leaves it unchanged.
+    again = svc.update_transaction(
+        t.id, notes="set again", update_notes=True
+    )
+    assert again.notes == "set again"
+    untouched = svc.update_transaction(t.id, quantity=Decimal("2"))
+    assert untouched.notes == "set again"
+    assert untouched.quantity == Decimal("2")
+
+
+def test_update_transaction_validates_quantity(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    t = svc.add_transaction(
+        asset_id=aid,
+        transaction_type="buy",
+        quantity=Decimal("1"),
+        price_per_unit=Decimal("100"),
+        transaction_date=date(2026, 4, 1),
+    )
+    with pytest.raises(svc.PortfolioError):
+        svc.update_transaction(t.id, quantity=Decimal("0"))
+
+
+def test_update_transaction_unknown_id_raises(isolated_db: Path) -> None:
+    with pytest.raises(svc.TransactionNotFoundError):
+        svc.update_transaction(9999, quantity=Decimal("1"))
+
+
+def test_update_transaction_recomputes_position(isolated_db: Path) -> None:
+    """An edit changes the derived position state on the next read —
+    no separate position-table sync needed."""
+    aid = _seed_asset()
+    t = svc.add_transaction(
+        asset_id=aid,
+        transaction_type="buy",
+        quantity=Decimal("10"),
+        price_per_unit=Decimal("100"),
+        transaction_date=date(2026, 4, 1),
+    )
+    pos_before = svc.list_positions()[0]
+    assert pos_before.quantity == Decimal("10")
+    assert pos_before.avg_cost == Decimal("100")
+
+    svc.update_transaction(t.id, quantity=Decimal("20"))
+    pos_after = svc.list_positions()[0]
+    assert pos_after.quantity == Decimal("20")
+    assert pos_after.avg_cost == Decimal("100")  # price unchanged
+
+
+# ---------------------------------------------------------------------------
 # Position computation — pure-compute via _compute_position_state
 # ---------------------------------------------------------------------------
 

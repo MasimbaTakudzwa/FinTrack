@@ -782,6 +782,27 @@ export function createPortfolioTransaction(
   );
 }
 
+export interface UpdateTransactionBody {
+  transaction_type?: TransactionType;
+  quantity?: string | number;
+  price_per_unit?: string | number;
+  transaction_date?: string;
+  fee?: string | number;
+  notes?: string | null;
+}
+
+export function updatePortfolioTransaction(
+  id: number,
+  body: UpdateTransactionBody,
+  signal?: AbortSignal,
+): Promise<PortfolioTransaction> {
+  return apiPut<PortfolioTransaction, UpdateTransactionBody>(
+    `/api/portfolio/transactions/${id}/`,
+    body,
+    { signal },
+  );
+}
+
 export function deletePortfolioTransaction(
   id: number,
   signal?: AbortSignal,

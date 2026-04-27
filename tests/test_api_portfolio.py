@@ -161,6 +161,82 @@ def test_list_transactions_filter_by_asset(isolated_db: Path) -> None:
         assert body["transactions"][0]["symbol"] == "AAPL"
 
 
+def test_update_transaction_changes_fields(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/portfolio/transactions/",
+            json={
+                "asset_id": aid,
+                "transaction_type": "buy",
+                "quantity": "10",
+                "price_per_unit": "100",
+                "transaction_date": "2026-04-01",
+            },
+        ).json()
+        resp = client.put(
+            f"/api/portfolio/transactions/{created['id']}/",
+            json={"quantity": "12", "price_per_unit": "105"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert Decimal(body["quantity"]) == Decimal("12")
+        assert Decimal(body["price_per_unit"]) == Decimal("105")
+        # Untouched fields preserved.
+        assert body["transaction_date"] == "2026-04-01"
+
+
+def test_update_transaction_unknown_id_404(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.put(
+            "/api/portfolio/transactions/9999/", json={"quantity": "1"}
+        )
+        assert resp.status_code == 404
+
+
+def test_update_transaction_zero_quantity_400(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/portfolio/transactions/",
+            json={
+                "asset_id": aid,
+                "transaction_type": "buy",
+                "quantity": "1",
+                "price_per_unit": "100",
+                "transaction_date": "2026-04-01",
+            },
+        ).json()
+        resp = client.put(
+            f"/api/portfolio/transactions/{created['id']}/",
+            json={"quantity": "0"},
+        )
+        assert resp.status_code == 400
+
+
+def test_update_transaction_extra_field_422(isolated_db: Path) -> None:
+    """``model_config['extra'] = 'forbid'`` on UpdateTransactionIn means
+    unknown keys come back as 422 — caught earlier than service-layer
+    coercion."""
+    aid = _seed_asset()
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/portfolio/transactions/",
+            json={
+                "asset_id": aid,
+                "transaction_type": "buy",
+                "quantity": "1",
+                "price_per_unit": "100",
+                "transaction_date": "2026-04-01",
+            },
+        ).json()
+        resp = client.put(
+            f"/api/portfolio/transactions/{created['id']}/",
+            json={"asset_id": 999},  # asset reassignment is not allowed
+        )
+        assert resp.status_code == 422
+
+
 def test_delete_transaction_removes_it(isolated_db: Path) -> None:
     aid = _seed_asset()
     with TestClient(app) as client:
