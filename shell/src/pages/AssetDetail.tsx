@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   ArrowUpRight,
   Bell,
+  Briefcase,
   Eye,
   EyeOff,
   Loader2,
@@ -42,6 +43,7 @@ import { ForecastAccuracyPanel } from "../components/ForecastAccuracyPanel";
 import { NewsList } from "../components/NewsList";
 import { SentimentSummaryPanel } from "../components/SentimentSummaryPanel";
 import { StrongSentimentDaysPanel } from "../components/StrongSentimentDaysPanel";
+import { TransactionAddModal } from "../components/TransactionAddModal";
 import { VolatilityPanel } from "../components/VolatilityPanel";
 import { useResolvedTheme } from "../stores/useSettings";
 
@@ -326,6 +328,8 @@ function AssetBody({
   const [lastCreatedAlert, setLastCreatedAlert] = useState<PriceAlert | null>(
     null,
   );
+  const [txnOpen, setTxnOpen] = useState(false);
+  const [txnFlash, setTxnFlash] = useState(false);
   const [tfId, setTfId] = useState<TimeframeId>("1D");
   const [measure, setMeasure] = useState<MeasureState>(MEASURE_EMPTY);
   const [fc, setFc] = useState<ForecastState>(FORECAST_INITIAL);
@@ -500,6 +504,14 @@ function AssetBody({
         <div className="flex items-start gap-3">
           <button
             type="button"
+            onClick={() => setTxnOpen(true)}
+            className="mt-1 inline-flex items-center gap-1.5 rounded-md border border-indigo-500/40 bg-indigo-500/5 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-500/10 dark:border-indigo-500/40 dark:text-indigo-300"
+          >
+            <Briefcase className="h-3.5 w-3.5" />
+            Record transaction
+          </button>
+          <button
+            type="button"
             onClick={() => setAlertOpen(true)}
             className="mt-1 inline-flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/5 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-500/10 dark:border-emerald-500/40 dark:text-emerald-300"
           >
@@ -539,6 +551,28 @@ function AssetBody({
           onClose={() => setAlertOpen(false)}
           onCreated={(a) => setLastCreatedAlert(a)}
         />
+      )}
+
+      {txnOpen && (
+        <TransactionAddModal
+          assets={[asset]}
+          defaultAssetId={asset.id}
+          onClose={() => setTxnOpen(false)}
+          onCreated={() => {
+            setTxnOpen(false);
+            setTxnFlash(true);
+            setTimeout(() => setTxnFlash(false), 6000);
+          }}
+        />
+      )}
+
+      {txnFlash && (
+        <div className="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-800 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-300">
+          Transaction recorded for {asset.symbol}.{" "}
+          <Link to="/portfolio" className="font-medium underline">
+            View portfolio →
+          </Link>
+        </div>
       )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
