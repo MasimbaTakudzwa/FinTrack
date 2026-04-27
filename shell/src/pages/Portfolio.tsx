@@ -9,6 +9,7 @@ import {
   Plus,
   RefreshCw,
   Trash2,
+  Upload,
 } from "lucide-react";
 import {
   type Asset,
@@ -26,6 +27,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { PortfolioAllocationCard } from "../components/PortfolioAllocationCard";
 import { PortfolioPerformanceChart } from "../components/PortfolioPerformanceChart";
 import { TransactionAddModal } from "../components/TransactionAddModal";
+import { TransactionImportModal } from "../components/TransactionImportModal";
 
 type TabId = "positions" | "transactions";
 
@@ -59,6 +61,7 @@ export function Portfolio() {
   const [tab, setTab] = useState<TabId>("positions");
   const [tick, setTick] = useState(0);
   const [addOpen, setAddOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<PortfolioTransaction | null>(
     null,
   );
@@ -161,6 +164,20 @@ export function Portfolio() {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={() => setImportOpen(true)}
+            disabled={state.assets.length === 0}
+            title={
+              state.assets.length === 0
+                ? "Add assets first before importing"
+                : "Import transactions from CSV"
+            }
+            className="inline-flex items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            <Upload className="h-3.5 w-3.5" />
+            Import
+          </button>
+          <button
+            type="button"
             onClick={onExportCsv}
             disabled={state.transactions.length === 0}
             title={
@@ -259,6 +276,13 @@ export function Portfolio() {
           assets={state.assets}
           onClose={() => setAddOpen(false)}
           onCreated={onTransactionAdded}
+        />
+      )}
+
+      {importOpen && (
+        <TransactionImportModal
+          onClose={() => setImportOpen(false)}
+          onImported={() => refresh()}
         />
       )}
 

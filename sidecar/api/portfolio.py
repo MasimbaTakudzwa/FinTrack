@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from sidecar.services.portfolio import (
     AssetNotFoundError,
+    ImportResult,
     PerformancePoint,
     PortfolioError,
     TransactionNotFoundError,
@@ -33,6 +34,7 @@ from sidecar.services.portfolio import (
     compute_summary,
     delete_transaction,
     get_transaction,
+    import_transactions_csv,
     list_positions,
     list_transactions,
 )
@@ -242,6 +244,53 @@ def create_transaction_route(body: CreateTransactionIn) -> TransactionOutModel:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PortfolioError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class ImportTransactionsIn(BaseModel):
+    """JSON body for `POST /api/portfolio/transactions/import`.
+
+    `csv` is the raw text content of a CSV — the UI reads the file
+    locally and posts the string. Avoids multipart-form complexity
+    (Tauri webviews handle JSON everywhere; multipart sometimes
+    doesn't surface the file picker correctly).
+    """
+
+    csv: str = Field(min_length=0)
+
+
+class ImportRowErrorModel(BaseModel):
+    row: int
+    message: str
+
+
+class ImportResultModel(BaseModel):
+    inserted: int
+    skipped: int
+    errors: list[ImportRowErrorModel]
+
+
+@router.post(
+    "/transactions/import",
+    response_model=ImportResultModel,
+)
+def import_transactions_route(body: ImportTransactionsIn) -> ImportResultModel:
+    """Bulk-import transactions from a CSV body.
+
+    Accepts the same column layout as the `/export.csv` endpoint
+    (round-trip compatible). Per-row failures are accumulated into
+    `errors` rather than aborting the import — partial success is
+    more useful than all-or-nothing for human-curated CSVs.
+    """
+    result = import_transactions_csv(body.csv)
+    return _import_result_to_model(result)
+
+
+def _import_result_to_model(r: ImportResult) -> ImportResultModel:
+    return ImportResultModel(
+        inserted=r.inserted,
+        skipped=r.skipped,
+        errors=[ImportRowErrorModel(row=e.row, message=e.message) for e in r.errors],
+    )
 
 
 @router.delete("/transactions/{transaction_id}/", status_code=204)

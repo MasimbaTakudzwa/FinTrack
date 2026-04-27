@@ -368,3 +368,170 @@ def test_export_csv_filename_has_today(isolated_db: Path) -> None:
         cd = resp.headers["content-disposition"]
         assert "fintrack-transactions-" in cd
         assert ".csv" in cd
+
+
+# ---------------------------------------------------------------------------
+# CSV import
+# ---------------------------------------------------------------------------
+
+
+def test_import_csv_empty_body_no_op(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/portfolio/transactions/import", json={"csv": ""}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == {"inserted": 0, "skipped": 0, "errors": []}
+
+
+def test_import_csv_round_trip(isolated_db: Path) -> None:
+    """Round-trip: export a populated portfolio, wipe it, import the
+    CSV back, end up with the same transactions."""
+    aid = _seed_asset()
+    with TestClient(app) as client:
+        # Seed two transactions.
+        for date_str, qty, price in [
+            ("2026-04-01", "10", "150"),
+            ("2026-04-15", "5", "160"),
+        ]:
+            client.post(
+                "/api/portfolio/transactions/",
+                json={
+                    "asset_id": aid,
+                    "transaction_type": "buy",
+                    "quantity": qty,
+                    "price_per_unit": price,
+                    "transaction_date": date_str,
+                },
+            )
+
+        export = client.get("/api/portfolio/transactions/export.csv").text
+
+        # Wipe.
+        for t in client.get("/api/portfolio/transactions/").json()[
+            "transactions"
+        ]:
+            client.delete(f"/api/portfolio/transactions/{t['id']}/")
+        assert (
+            client.get("/api/portfolio/transactions/").json()["count"] == 0
+        )
+
+        # Import the export.
+        resp = client.post(
+            "/api/portfolio/transactions/import", json={"csv": export}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["inserted"] == 2
+        assert body["skipped"] == 0
+        assert body["errors"] == []
+
+        listed = client.get("/api/portfolio/transactions/").json()
+        assert listed["count"] == 2
+
+
+def test_import_csv_missing_required_header_returns_error(
+    isolated_db: Path,
+) -> None:
+    csv = "transaction_date,symbol\n2026-04-01,AAPL\n"
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/portfolio/transactions/import", json={"csv": csv}
+        )
+        body = resp.json()
+        assert body["inserted"] == 0
+        assert body["errors"][0]["row"] == 1
+        assert "missing required columns" in body["errors"][0]["message"]
+
+
+def test_import_csv_unknown_symbol_skipped(isolated_db: Path) -> None:
+    csv = (
+        "transaction_date,symbol,transaction_type,quantity,price_per_unit\n"
+        "2026-04-01,GHOST,buy,1,100\n"
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/portfolio/transactions/import", json={"csv": csv}
+        )
+        body = resp.json()
+        assert body["inserted"] == 0
+        assert body["skipped"] == 1
+        assert "GHOST" in body["errors"][0]["message"]
+
+
+def test_import_csv_partial_success(isolated_db: Path) -> None:
+    """One valid row + one bad row → 1 inserted, 1 skipped, 1 error."""
+    aid = _seed_asset()
+    csv = (
+        "transaction_date,symbol,transaction_type,quantity,price_per_unit\n"
+        "2026-04-01,AAPL,buy,10,150\n"
+        "2026-04-02,AAPL,buy,not-a-number,160\n"
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/portfolio/transactions/import", json={"csv": csv}
+        )
+        body = resp.json()
+        assert body["inserted"] == 1
+        assert body["skipped"] == 1
+        assert body["errors"][0]["row"] == 3  # 1 header + 2 = third row
+        # Verify the valid row actually landed.
+        listed = client.get("/api/portfolio/transactions/").json()
+        assert listed["count"] == 1
+        assert listed["transactions"][0]["asset_id"] == aid
+
+
+def test_import_csv_extra_columns_silently_ignored(isolated_db: Path) -> None:
+    """Exports from other tools often include extra columns (id,
+    broker, …) — we should accept them rather than failing."""
+    _seed_asset()
+    csv = (
+        "id,transaction_date,symbol,transaction_type,quantity,"
+        "price_per_unit,broker\n"
+        "999,2026-04-01,AAPL,buy,10,150,Robinhood\n"
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/portfolio/transactions/import", json={"csv": csv}
+        )
+        body = resp.json()
+        assert body["inserted"] == 1
+        assert body["errors"] == []
+
+
+def test_import_csv_blank_lines_skipped(isolated_db: Path) -> None:
+    """Blank rows in the middle of the CSV (typical when copy-pasting
+    from spreadsheet apps) shouldn't count as errors."""
+    _seed_asset()
+    csv = (
+        "transaction_date,symbol,transaction_type,quantity,price_per_unit\n"
+        "2026-04-01,AAPL,buy,10,150\n"
+        ",,,,\n"
+        "2026-04-02,AAPL,buy,5,160\n"
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/portfolio/transactions/import", json={"csv": csv}
+        )
+        body = resp.json()
+        assert body["inserted"] == 2
+        assert body["skipped"] == 0
+
+
+def test_import_csv_preserves_fee_and_notes(isolated_db: Path) -> None:
+    _seed_asset()
+    csv = (
+        "transaction_date,symbol,transaction_type,quantity,"
+        "price_per_unit,fee,notes\n"
+        "2026-04-01,AAPL,buy,10,150,1.5,my note\n"
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/portfolio/transactions/import", json={"csv": csv}
+        )
+        assert resp.json()["inserted"] == 1
+        listed = client.get("/api/portfolio/transactions/").json()
+        t = listed["transactions"][0]
+        assert Decimal(t["fee"]) == Decimal("1.5")
+        assert t["notes"] == "my note"

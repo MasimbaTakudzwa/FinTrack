@@ -822,6 +822,29 @@ export function getPortfolioPerformance(
   });
 }
 
+export interface ImportResult {
+  inserted: number;
+  skipped: number;
+  errors: { row: number; message: string }[];
+}
+
+/**
+ * Bulk-import transactions from a CSV body. Per-row failures are
+ * accumulated rather than aborting the import; the caller renders
+ * partial-success output. Round-trip compatible with
+ * `exportPortfolioTransactionsCsv` for backup / restore.
+ */
+export function importPortfolioTransactionsCsv(
+  csv: string,
+  signal?: AbortSignal,
+): Promise<ImportResult> {
+  return apiPost<ImportResult, { csv: string }>(
+    "/api/portfolio/transactions/import",
+    { csv },
+    { signal },
+  );
+}
+
 /**
  * Fetch the transactions-export CSV as a Blob. Caller is responsible
  * for triggering the browser download via an anchor + URL.createObjectURL

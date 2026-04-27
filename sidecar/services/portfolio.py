@@ -632,3 +632,157 @@ def compute_summary() -> PortfolioSummary:
 
 def _utcnow() -> datetime:  # tiny indirection so tests can freeze if needed
     return datetime.now(UTC)
+
+
+# ---------------------------------------------------------------------------
+# CSV import
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ImportRowError:
+    """Per-row failure surfaced back to the caller.
+
+    ``row`` is 1-indexed including the header row, matching how
+    spreadsheet apps display row numbers — easier for the user to
+    locate the offending entry in their original file.
+    """
+
+    row: int
+    message: str
+
+
+@dataclass(frozen=True)
+class ImportResult:
+    inserted: int
+    skipped: int
+    errors: list[ImportRowError]
+
+
+# CSV columns we accept on import. Same shape as the export so a
+# round-trip works without manual editing. ``id`` and ``created_at``
+# are deliberately not consumed (they'd conflict with the new row's
+# auto-generated values).
+_IMPORT_REQUIRED_COLUMNS = {
+    "transaction_date",
+    "symbol",
+    "transaction_type",
+    "quantity",
+    "price_per_unit",
+}
+_IMPORT_OPTIONAL_COLUMNS = {"fee", "notes"}
+
+
+def import_transactions_csv(csv_text: str) -> ImportResult:
+    """Parse + validate + insert a CSV-formatted transaction batch.
+
+    The header row is required and is matched case-insensitively. Any
+    column outside the union of required + optional is silently
+    ignored — lets users paste exports from other tools that include
+    an ``id`` / ``created_at`` / ``broker`` column without us choking
+    on the extras.
+
+    Each row is validated independently. Failures (unknown symbol,
+    bad number, etc.) are accumulated into ``errors`` rather than
+    aborting the whole import — partial-success is more useful than
+    all-or-nothing for human-curated CSVs.
+    """
+    import csv as _csv  # local — saves a top-level import for the rare path
+
+    if not csv_text or not csv_text.strip():
+        return ImportResult(inserted=0, skipped=0, errors=[])
+
+    reader = _csv.DictReader(_string_io(csv_text))
+    headers = {h.lower() for h in (reader.fieldnames or [])}
+    missing = _IMPORT_REQUIRED_COLUMNS - headers
+    if missing:
+        return ImportResult(
+            inserted=0,
+            skipped=0,
+            errors=[
+                ImportRowError(
+                    row=1,
+                    message=(
+                        f"missing required columns: {', '.join(sorted(missing))}"
+                    ),
+                )
+            ],
+        )
+
+    # Build a symbol → asset_id map up front so we don't issue one query
+    # per CSV row. Symbols not in the catalog are flagged as per-row errors.
+    with session_scope() as session:
+        rows = session.execute(select(Asset.id, Asset.symbol)).all()
+        symbol_to_id: dict[str, int] = {sym.upper(): int(aid) for aid, sym in rows}
+
+    inserted = 0
+    skipped = 0
+    errors: list[ImportRowError] = []
+
+    for idx, raw in enumerate(reader, start=2):  # row 1 is header
+        # Lower-case the keys so the row dict matches our ASCII column
+        # names regardless of how the CSV was exported.
+        norm = {k.lower(): (v or "").strip() for k, v in raw.items() if k}
+
+        # Skip blank lines (DictReader yields {col: ''}).
+        if not any(v for v in norm.values()):
+            continue
+
+        try:
+            sym = norm["symbol"].upper()
+            if sym not in symbol_to_id:
+                raise PortfolioError(
+                    f"symbol {sym!r} not in tracked assets — add it first"
+                )
+            asset_id = symbol_to_id[sym]
+
+            ttype = _parse_transaction_type(norm["transaction_type"])
+            qty = _to_decimal(norm["quantity"], field="quantity")
+            price = _to_decimal(
+                norm["price_per_unit"], field="price_per_unit"
+            )
+            fee_raw = norm.get("fee", "0") or "0"
+            fee_dec = _to_decimal(fee_raw, field="fee", allow_zero=True)
+            notes_raw = norm.get("notes", "") or ""
+            notes = notes_raw[:256] if notes_raw else None
+
+            try:
+                t_date = date.fromisoformat(norm["transaction_date"])
+            except (KeyError, ValueError) as exc:
+                raise PortfolioError(
+                    "transaction_date must be YYYY-MM-DD"
+                ) from exc
+
+            # Persist via the same path as add_transaction — but skip
+            # the asset-resolution lookup we already did above.
+            with session_scope() as session:
+                txn = PortfolioTransaction(
+                    asset_id=asset_id,
+                    transaction_type=ttype.value,
+                    quantity=qty,
+                    price_per_unit=price,
+                    transaction_date=t_date,
+                    fee=fee_dec,
+                    notes=notes,
+                )
+                session.add(txn)
+                session.flush()
+            inserted += 1
+        except PortfolioError as exc:
+            errors.append(ImportRowError(row=idx, message=str(exc)))
+            skipped += 1
+        except Exception as exc:  # pragma: no cover — defensive
+            errors.append(
+                ImportRowError(row=idx, message=f"unexpected: {exc}")
+            )
+            skipped += 1
+
+    return ImportResult(inserted=inserted, skipped=skipped, errors=errors)
+
+
+def _string_io(text: str) -> Any:
+    """Local-import wrapper around `io.StringIO` so the rare
+    import-CSV path doesn't drag `io` into module load time."""
+    import io as _io
+
+    return _io.StringIO(text)
