@@ -91,14 +91,126 @@ def test_create_bad_direction_422(isolated_db: Path) -> None:
         assert resp.status_code == 422
 
 
-def test_create_nonpositive_threshold_422(isolated_db: Path) -> None:
+def test_create_nonpositive_threshold_400(isolated_db: Path) -> None:
+    """Sentiment alerts allow negative thresholds, so the schema-level
+    ``gt=0`` constraint was loosened. Price alerts still require a
+    positive threshold — enforced now by the service layer, surfaced
+    as a 400 instead of the previous Pydantic 422."""
     aid = _seed_asset()
     with TestClient(app) as client:
         resp = client.post(
             "/api/alerts/",
             json={"asset_id": aid, "threshold": "0", "direction": "above"},
         )
+        assert resp.status_code == 400
+        assert "threshold" in resp.json()["detail"].lower()
+
+
+def test_create_sentiment_alert_happy(isolated_db: Path) -> None:
+    """Sentiment alerts accept negative thresholds and require window_days."""
+    aid = _seed_asset()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/alerts/",
+            json={
+                "asset_id": aid,
+                "threshold": "-0.3",
+                "direction": "below",
+                "metric": "sentiment",
+                "window_days": 7,
+            },
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["metric"] == "sentiment"
+        assert body["window_days"] == 7
+        assert Decimal(body["threshold"]) == Decimal("-0.3")
+
+
+def test_create_sentiment_alert_requires_window_days_400(
+    isolated_db: Path,
+) -> None:
+    aid = _seed_asset()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/alerts/",
+            json={
+                "asset_id": aid,
+                "threshold": "0.5",
+                "direction": "above",
+                "metric": "sentiment",
+            },
+        )
+        assert resp.status_code == 400
+        assert "window_days" in resp.json()["detail"].lower()
+
+
+def test_create_sentiment_alert_threshold_out_of_range_400(
+    isolated_db: Path,
+) -> None:
+    aid = _seed_asset()
+    with TestClient(app) as client:
+        # Sentiment threshold must be in [-1, +1]; 5 is way out of range.
+        resp = client.post(
+            "/api/alerts/",
+            json={
+                "asset_id": aid,
+                "threshold": "5",
+                "direction": "above",
+                "metric": "sentiment",
+                "window_days": 7,
+            },
+        )
+        assert resp.status_code == 400
+
+
+def test_create_price_alert_with_window_days_400(isolated_db: Path) -> None:
+    """``window_days`` is only valid for sentiment metrics."""
+    aid = _seed_asset()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/alerts/",
+            json={
+                "asset_id": aid,
+                "threshold": "100",
+                "direction": "above",
+                "metric": "price",
+                "window_days": 7,
+            },
+        )
+        assert resp.status_code == 400
+        assert "window_days" in resp.json()["detail"].lower()
+
+
+def test_create_unknown_metric_422(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/alerts/",
+            json={
+                "asset_id": aid,
+                "threshold": "100",
+                "direction": "above",
+                "metric": "volatility",  # not in the literal set
+                "window_days": 7,
+            },
+        )
+        # Pydantic literal mismatch → 422.
         assert resp.status_code == 422
+
+
+def test_create_default_metric_is_price(isolated_db: Path) -> None:
+    """Omitting ``metric`` defaults to "price" and ``window_days`` is null."""
+    aid = _seed_asset()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/alerts/",
+            json={"asset_id": aid, "threshold": "100", "direction": "above"},
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["metric"] == "price"
+        assert body["window_days"] is None
 
 
 def test_list_hydrates_last_price(isolated_db: Path) -> None:

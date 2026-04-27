@@ -20,6 +20,9 @@ from sidecar.scheduler.jobs import (
     ingest_macro,
     ingest_news,
     ingest_prices,
+    ingest_prices_daily,
+    score_news_sentiment_job,
+    train_forecasts_job,
 )
 from sidecar.services.settings import load_effective_config
 
@@ -123,6 +126,27 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
         with contextlib.suppress(JobLookupError):
             scheduler.remove_job("ingest_macro")
 
+    if bool(config["ingest_prices_daily.enabled"]):
+        # Same fire-on-first-add pattern as ingest_macro — on a fresh install
+        # the user needs their 5y backfill to land in seconds, not on the next
+        # day's cron. On reconfigure / restart we respect the existing schedule.
+        daily_kwargs: dict[str, Any] = {}
+        if scheduler.get_job("ingest_prices_daily") is None:
+            daily_kwargs["next_run_time"] = now
+        scheduler.add_job(
+            ingest_prices_daily,
+            trigger=CronTrigger(
+                hour=int(config["ingest_prices_daily.cron_hour_utc"]), minute=0
+            ),
+            id="ingest_prices_daily",
+            name="Ingest daily closes (5y backfill + incremental)",
+            replace_existing=True,
+            **daily_kwargs,
+        )
+    else:
+        with contextlib.suppress(JobLookupError):
+            scheduler.remove_job("ingest_prices_daily")
+
     if bool(config["check_alerts.enabled"]):
         scheduler.add_job(
             check_price_alerts,
@@ -137,6 +161,52 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
     else:
         with contextlib.suppress(JobLookupError):
             scheduler.remove_job("check_price_alerts")
+
+    if bool(config["train_forecasts.enabled"]):
+        # Weekly SARIMAX retrain. Fires on the configured day-of-week + hour
+        # (UTC). Fire-on-first-add is intentionally NOT applied here: the fit
+        # is CPU-intensive (~seconds per asset x N assets) and we don't want
+        # to slam a freshly-installed machine mid-startup — `ingest_prices_daily`
+        # has to land first before there's any training data anyway. Users
+        # who want a forecast *now* can hit the "Retrain" button in the UI.
+        scheduler.add_job(
+            train_forecasts_job,
+            trigger=CronTrigger(
+                day_of_week=int(config["train_forecasts.cron_day_of_week"]),
+                hour=int(config["train_forecasts.cron_hour_utc"]),
+                minute=0,
+            ),
+            id="train_forecasts",
+            name="Weekly SARIMAX retrain for every active asset",
+            replace_existing=True,
+        )
+    else:
+        with contextlib.suppress(JobLookupError):
+            scheduler.remove_job("train_forecasts")
+
+    if bool(config["score_news_sentiment.enabled"]):
+        # Backfill any unscored articles via VADER. The new-article path is
+        # already covered inline by `ingest_news` so this job is a safety net
+        # for historical rows imported before sentiment was wired plus the
+        # very-occasional "ingest_news scored 0 because the ML backend
+        # blipped" case. Fire-on-first-add so a fresh install with imported
+        # articles populates immediately.
+        sentiment_kwargs: dict[str, Any] = {}
+        if scheduler.get_job("score_news_sentiment") is None:
+            sentiment_kwargs["next_run_time"] = now
+        scheduler.add_job(
+            score_news_sentiment_job,
+            trigger=IntervalTrigger(
+                minutes=int(config["score_news_sentiment.interval_minutes"])
+            ),
+            id="score_news_sentiment",
+            name="VADER sentiment backfill for unscored articles",
+            replace_existing=True,
+            **sentiment_kwargs,
+        )
+    else:
+        with contextlib.suppress(JobLookupError):
+            scheduler.remove_job("score_news_sentiment")
 
 
 def start() -> BackgroundScheduler | None:

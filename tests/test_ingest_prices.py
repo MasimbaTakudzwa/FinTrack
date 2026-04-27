@@ -135,3 +135,67 @@ def test_ingest_prices_for_symbols_forwards_period_and_interval(
     jobs.ingest_prices_for_symbols(["AAPL"], period="1y", interval="1d")
 
     assert calls == [("1d", "5m"), ("60d", "5m"), ("1y", "1d")]
+
+
+def test_ingest_prices_daily_uses_5y_daily_and_tags_interval(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ingest_prices_daily`` is the training base for forecasting — it MUST
+    call the fetcher with ``period="5y", interval="1d"`` and persist rows
+    tagged with ``interval="1d"`` so the 5m intraday series and the daily
+    close series can coexist in ``price_points``.
+    """
+    _seed_assets()
+    base = datetime(2026, 4, 22, tzinfo=UTC)
+    captured: list[tuple[str, str]] = []
+
+    def _fake_fetch(
+        symbols: object, *, period: str = "1d", interval: str = "5m"
+    ) -> list[PriceBar]:
+        captured.append((period, interval))
+        return [
+            PriceBar(
+                symbol="AAPL",
+                timestamp=base + timedelta(days=i),
+                interval=interval,
+                open=Decimal("150"),
+                high=Decimal("152"),
+                low=Decimal("149"),
+                close=Decimal("151.00") + Decimal(i),
+                volume=10_000_000,
+            )
+            for i in range(4)
+        ]
+
+    from sidecar.scheduler import jobs
+
+    monkeypatch.setattr(jobs, "fetch_prices", _fake_fetch)
+
+    inserted = jobs.ingest_prices_daily()
+    assert inserted == 4
+    assert captured == [("5y", "1d")]
+
+    with session_scope() as s:
+        rows = s.execute(select(PricePoint)).scalars().all()
+        assert len(rows) == 4
+        assert {r.interval for r in rows} == {"1d"}
+
+
+def test_ingest_prices_daily_skips_with_no_assets(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sidecar.scheduler import jobs
+
+    called = {"n": 0}
+
+    def _fake_fetch(
+        symbols: object, *, period: str = "1d", interval: str = "5m"
+    ) -> list[PriceBar]:
+        called["n"] += 1
+        return []
+
+    monkeypatch.setattr(jobs, "fetch_prices", _fake_fetch)
+
+    inserted = jobs.ingest_prices_daily()
+    assert inserted == 0
+    assert called["n"] == 0, "no fetch should be issued when no active assets exist"

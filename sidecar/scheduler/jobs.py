@@ -49,6 +49,7 @@ def _upsert_bars(session: Session, symbol_to_id: dict[str, int], bars: list[Pric
             {
                 "asset_id": asset_id,
                 "timestamp": bar.timestamp,
+                "interval": bar.interval,
                 "open": bar.open,
                 "high": bar.high,
                 "low": bar.low,
@@ -58,11 +59,20 @@ def _upsert_bars(session: Session, symbol_to_id: dict[str, int], bars: list[Pric
         )
     if not rows:
         return 0
-    stmt = sqlite_insert(PricePoint).values(rows).on_conflict_do_nothing(
-        index_elements=["asset_id", "timestamp"]
-    )
-    result = cast(CursorResult[object], session.execute(stmt))
-    return result.rowcount or 0
+    # 5y of daily closes for ~10 assets is ~12K rows * 8 cols ≈ 96K bound
+    # params — past SQLite's 32766-variable statement cap. Chunk to stay
+    # under the ceiling. 500 rows ≈ 4000 params per stmt — comfortable
+    # headroom even if the schema grows.
+    inserted = 0
+    chunk_size = 500
+    for offset in range(0, len(rows), chunk_size):
+        chunk = rows[offset : offset + chunk_size]
+        stmt = sqlite_insert(PricePoint).values(chunk).on_conflict_do_nothing(
+            index_elements=["asset_id", "timestamp", "interval"]
+        )
+        result = cast(CursorResult[object], session.execute(stmt))
+        inserted += result.rowcount or 0
+    return inserted
 
 
 def ingest_prices_for_symbols(
@@ -73,10 +83,11 @@ def ingest_prices_for_symbols(
 ) -> int:
     """Fetch and persist OHLCV bars for an explicit list of symbols.
 
-    Used both by the scheduled ``ingest_prices`` job (which passes every
-    active asset symbol with the defaults — a minimal incremental tick) and
-    by the "add asset" flow (which passes ``period="60d", interval="5m"`` so
-    the user gets ~60 days of history on add, not just the last few bars).
+    Used both by the scheduled ``ingest_prices`` job (every active asset with
+    the 5m defaults — a minimal incremental tick), the "add asset" flow (which
+    passes ``period="60d", interval="5m"`` so the user gets ~60 days of
+    history on add, not just the last few bars), and by ``ingest_prices_daily``
+    (``period="5y", interval="1d"`` — the training base for forecasting).
 
     Returns the number of newly inserted PricePoint rows.
     """
@@ -102,8 +113,9 @@ def ingest_prices_for_symbols(
             return 0
         inserted = _upsert_bars(session, symbol_to_id, bars)
         logger.info(
-            "ingest_prices_for_symbols: inserted %d new bars from %d fetched across %d symbols",
+            "ingest_prices_for_symbols: inserted %d new bars (interval=%s) from %d fetched across %d symbols",
             inserted,
+            interval,
             len(bars),
             len(symbol_to_id),
         )
@@ -114,7 +126,9 @@ def ingest_prices() -> int:
     """Fetch latest OHLCV bars for every active asset and persist new rows.
 
     Returns the number of newly inserted PricePoint rows (duplicates are skipped
-    via ON CONFLICT DO NOTHING on (asset_id, timestamp)).
+    via ON CONFLICT DO NOTHING on (asset_id, timestamp, interval)). Intraday
+    5-min cadence — see ``ingest_prices_daily`` for the once-per-day close-bar
+    backfill that feeds the forecasting engine.
     """
     with session_scope() as session:
         symbols = list(
@@ -126,6 +140,30 @@ def ingest_prices() -> int:
         logger.info("ingest_prices: no active assets, skipping")
         return 0
     return ingest_prices_for_symbols(symbols)
+
+
+def ingest_prices_daily() -> int:
+    """Pull daily-bar closes for every active asset — training base for forecasts.
+
+    Uses yfinance ``period="5y", interval="1d"`` which returns ~1,250 rows
+    per asset on first call and a single new row on each subsequent call
+    after market close. The ON CONFLICT clause dedups, so running this
+    more often than once a day is safe but wasteful.
+
+    Scheduled via CronTrigger at ``ingest_prices_daily.cron_hour_utc`` (default
+    22 UTC ≈ 6pm ET, after US market close) + fire-on-first-add so a fresh
+    install gets the full 5y backfill within seconds of the scheduler starting.
+    """
+    with session_scope() as session:
+        symbols = list(
+            session.execute(
+                select(Asset.symbol).where(Asset.is_active.is_(True))
+            ).scalars()
+        )
+    if not symbols:
+        logger.info("ingest_prices_daily: no active assets, skipping")
+        return 0
+    return ingest_prices_for_symbols(symbols, period="5y", interval="1d")
 
 
 def ingest_crypto() -> int:
@@ -224,7 +262,10 @@ def ingest_news() -> int:
     """Fetch Yahoo Finance RSS news for every active asset.
 
     Articles are dedup'd by URL across assets — the same headline mentioning
-    multiple symbols is stored once and linked to each matched asset.
+    multiple symbols is stored once and linked to each matched asset. After
+    upserting, every article that came back without a sentiment score yet is
+    fed through VADER inline so the user sees scored headlines immediately
+    rather than waiting for the next periodic backfill tick.
 
     Returns the number of newly inserted article_asset association rows (which
     is close to, but not exactly, "new articles" — an existing article linking
@@ -252,13 +293,45 @@ def ingest_news() -> int:
         linked = _upsert_article_assets(
             session, items, url_to_article_id, symbol_to_id
         )
-        logger.info(
-            "ingest_news: linked %d new (article,asset) pairs from %d items across %d symbols",
-            linked,
-            len(items),
-            len(symbol_to_id),
-        )
-        return linked
+        # Identify which of the upserted articles are still unscored so we
+        # don't re-score the existing-and-already-rated ones. This also
+        # naturally narrows scoring to the brand-new inserts on a steady-
+        # state run when most URLs were already in the DB.
+        article_ids = list({aid for aid in url_to_article_id.values()})
+        unscored_ids = [
+            aid for (aid,) in session.execute(
+                select(Article.id).where(
+                    Article.id.in_(article_ids),
+                    Article.sentiment.is_(None),
+                )
+            ).all()
+        ]
+
+    # Score outside the upsert transaction so a slow VADER load doesn't
+    # extend the write lock — and we tolerate a missing ML backend cleanly.
+    if unscored_ids:
+        try:
+            from ml.jobs import score_article_ids
+
+            scored = score_article_ids(unscored_ids)
+            if scored:
+                logger.info(
+                    "ingest_news: scored %d new headlines via VADER", scored
+                )
+        except ImportError as exc:
+            logger.info(
+                "ingest_news: ml package unavailable (%s) — skipping inline "
+                "sentiment scoring",
+                exc,
+            )
+
+    logger.info(
+        "ingest_news: linked %d new (article,asset) pairs from %d items across %d symbols",
+        linked,
+        len(items),
+        len(symbol_to_id),
+    )
+    return linked
 
 
 def ingest_macro() -> int:
@@ -338,4 +411,58 @@ def check_price_alerts() -> int:
         return _check_alerts()
     except Exception:  # pragma: no cover — defensive; don't let one bad alert nuke the job
         logger.exception("check_price_alerts failed")
+        return 0
+
+
+def train_forecasts_job() -> int:
+    """Scheduler entry for the weekly SARIMAX retrain.
+
+    Thin wrapper around ``ml.jobs.train_forecasts`` so the scheduler import
+    path stays symmetric with other ``ingest_*`` / ``check_*`` jobs. Importing
+    ``ml.jobs`` is lazy (inside the function body) so a sidecar launched
+    without ``requirements-ml.txt`` still boots — the forecast job then
+    simply logs an error if it ever fires without statsmodels installed.
+    Returns count of successfully retrained assets.
+    """
+    try:
+        from ml.jobs import train_forecasts
+
+        return train_forecasts()
+    except ImportError as exc:
+        logger.error(
+            "train_forecasts_job: ml package unavailable (%s) — "
+            "install requirements-ml.txt to enable forecasting",
+            exc,
+        )
+        return 0
+    except Exception:  # pragma: no cover — defensive
+        logger.exception("train_forecasts_job failed")
+        return 0
+
+
+def score_news_sentiment_job() -> int:
+    """Scheduler entry for the periodic VADER sentiment backfill.
+
+    Picks up any ``Article`` rows that don't yet have a sentiment score
+    (typically only historical rows imported before sentiment was wired,
+    or rows the inline-scoring step in ``ingest_news`` skipped due to a
+    transient backend issue). The new-article hot path stays inside
+    ``ingest_news`` so users don't wait on this scheduler tick.
+
+    Lazy import of ``ml.jobs`` so a sidecar without ``requirements-ml.txt``
+    still boots cleanly. Returns count of articles newly scored.
+    """
+    try:
+        from ml.jobs import score_articles
+
+        return score_articles()
+    except ImportError as exc:
+        logger.info(
+            "score_news_sentiment_job: ml package unavailable (%s) — "
+            "install requirements-ml.txt to enable sentiment scoring",
+            exc,
+        )
+        return 0
+    except Exception:  # pragma: no cover — defensive
+        logger.exception("score_news_sentiment_job failed")
         return 0

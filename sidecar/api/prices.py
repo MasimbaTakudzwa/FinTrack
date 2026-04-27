@@ -37,14 +37,25 @@ def get_prices(
     start: Annotated[datetime | None, Query(alias="from")] = None,
     end: Annotated[datetime | None, Query(alias="to")] = None,
     limit: Annotated[int, Query(ge=1, le=10000)] = 500,
+    interval: Annotated[str, Query(min_length=1, max_length=16)] = "5m",
 ) -> PriceSeriesOut:
+    """Return price bars for `symbol`, newest-first-filtered then ascending.
+
+    The `interval` filter defaults to "5m" (the intraday cadence served by
+    `ingest_prices`) to preserve backward compatibility with callers that
+    predate the Phase 2 daily-bar layer. Pass `interval=1d` to consume the
+    daily-close series used by the forecasting engine.
+    """
     symbol = symbol.upper()
     with session_scope() as s:
         asset = s.execute(select(Asset).where(Asset.symbol == symbol)).scalar_one_or_none()
         if asset is None:
             raise HTTPException(status_code=404, detail=f"Unknown symbol: {symbol}")
 
-        stmt = select(PricePoint).where(PricePoint.asset_id == asset.id)
+        stmt = select(PricePoint).where(
+            PricePoint.asset_id == asset.id,
+            PricePoint.interval == interval,
+        )
         if start is not None:
             stmt = stmt.where(PricePoint.timestamp >= start)
         if end is not None:

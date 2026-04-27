@@ -1,0 +1,514 @@
+"""HTTP tests for ``/api/forecast/`` endpoints.
+
+Mirrors the test_api_alerts.py layout: isolated SQLite, TestClient against
+the real FastAPI app, synthetic daily closes seeded into ``price_points``.
+Each full-stack retrain test exercises SARIMAX end-to-end (~0.5 s) so we
+keep the count modest; finer-grained ML mechanics live in test_ml_jobs.py.
+"""
+
+from __future__ import annotations
+
+import math
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+from ml.jobs import train_one
+from sidecar.db.engine import session_scope
+from sidecar.db.models import Asset, AssetType, PricePoint
+from sidecar.main import app
+
+
+def _seed_asset_with_daily_closes(
+    symbol: str,
+    *,
+    n_rows: int,
+    is_active: bool = True,
+    start: date = date(2024, 1, 1),
+) -> int:
+    """Seed an asset plus ``n_rows`` of synthetic daily OHLCV bars (interval='1d')."""
+    with session_scope() as s:
+        asset = Asset(
+            symbol=symbol,
+            name=symbol,
+            asset_type=AssetType.STOCK,
+            is_active=is_active,
+        )
+        s.add(asset)
+        s.flush()
+        bars = []
+        for i in range(n_rows):
+            price = 100.0 + 0.2 * i + 1.5 * math.sin(i / 5.0)
+            ts = datetime(
+                start.year, start.month, start.day, tzinfo=UTC
+            ) + timedelta(days=i)
+            bars.append(
+                PricePoint(
+                    asset_id=asset.id,
+                    timestamp=ts,
+                    interval="1d",
+                    open=Decimal(str(price)),
+                    high=Decimal(str(price * 1.01)),
+                    low=Decimal(str(price * 0.99)),
+                    close=Decimal(str(price)),
+                    volume=1_000_000,
+                )
+            )
+        s.add_all(bars)
+        return asset.id
+
+
+def _resolve_asset_id(symbol: str) -> int:
+    with session_scope() as s:
+        return int(
+            s.execute(select(Asset.id).where(Asset.symbol == symbol)).scalar_one()
+        )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/forecast/
+# ---------------------------------------------------------------------------
+
+
+def test_list_availability_empty_when_no_assets(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/")
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "eligible": [],
+            "persisted": [],
+            "engines": ["sarimax", "holt_winters"],
+        }
+
+
+def test_list_availability_eligible_without_persisted(isolated_db: Path) -> None:
+    """Asset has daily bars but no forecast row yet — it appears in ``eligible``
+    only. UI uses this to decide whether to show "Train now" vs. "Show forecast"."""
+    _seed_asset_with_daily_closes("AAPL", n_rows=10)
+
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["eligible"] == ["AAPL"]
+        assert payload["persisted"] == []
+
+
+def test_list_availability_persisted_after_training(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    train_one("AAPL")
+
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["eligible"] == ["AAPL"]
+        assert payload["persisted"] == ["AAPL"]
+
+
+def test_list_availability_distinguishes_eligible_from_persisted(
+    isolated_db: Path,
+) -> None:
+    """Two assets, only one trained — both in eligible, one in persisted."""
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    _seed_asset_with_daily_closes("MSFT", n_rows=10)  # has bars but under threshold
+    train_one("AAPL")
+
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert set(payload["eligible"]) == {"AAPL", "MSFT"}
+        assert payload["persisted"] == ["AAPL"]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/forecast/{symbol}/
+# ---------------------------------------------------------------------------
+
+
+def test_get_forecast_unknown_symbol_404(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/NOPE/")
+        assert resp.status_code == 404
+
+
+def test_get_forecast_known_symbol_no_forecast_404(isolated_db: Path) -> None:
+    """Symbol is tracked but no row in ``forecasts`` yet → 404.
+
+    UI disambiguates via ``/api/forecast/`` (the symbol will be in ``eligible``
+    but not in ``persisted``).
+    """
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/AAPL/")
+        assert resp.status_code == 404
+
+
+def test_get_forecast_happy_path(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    train_one("AAPL")
+    asset_id = _resolve_asset_id("AAPL")
+
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/AAPL/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["symbol"] == "AAPL"
+        assert body["asset_id"] == asset_id
+        assert body["horizon_days"] == 14
+        assert body["training_rows"] == 80
+        assert len(body["points"]) == 14
+        # Every point carries all six fields.
+        p = body["points"][0]
+        for key in (
+            "forecast_date",
+            "yhat",
+            "lower_80",
+            "upper_80",
+            "lower_95",
+            "upper_95",
+        ):
+            assert key in p
+        # 95% band strictly wraps the 80% band (or equal at the limit).
+        assert p["lower_95"] <= p["lower_80"]
+        assert p["upper_95"] >= p["upper_80"]
+
+
+def test_get_forecast_case_insensitive_symbol(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    train_one("AAPL")
+
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/aapl/")
+        assert resp.status_code == 200
+        assert resp.json()["symbol"] == "AAPL"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/forecast/{symbol}/retrain/
+# ---------------------------------------------------------------------------
+
+
+def test_retrain_happy_path(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+
+    with TestClient(app) as client:
+        resp = client.post("/api/forecast/AAPL/retrain/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["symbol"] == "AAPL"
+        assert body["training_rows"] == 80
+        assert len(body["points"]) == 14
+        # Persisted — a second GET succeeds.
+        resp2 = client.get("/api/forecast/AAPL/")
+        assert resp2.status_code == 200
+
+
+def test_retrain_unknown_symbol_404(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.post("/api/forecast/NOPE/retrain/")
+        assert resp.status_code == 404
+
+
+def test_retrain_insufficient_data_422(isolated_db: Path) -> None:
+    """Known asset but fewer than ``MIN_TRAINING_ROWS`` daily closes."""
+    _seed_asset_with_daily_closes("AAPL", n_rows=30)
+
+    with TestClient(app) as client:
+        resp = client.post("/api/forecast/AAPL/retrain/")
+        assert resp.status_code == 422
+        assert "closes" in resp.json()["detail"].lower()
+
+
+def test_retrain_case_insensitive_symbol(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+
+    with TestClient(app) as client:
+        resp = client.post("/api/forecast/aapl/retrain/")
+        assert resp.status_code == 200
+        assert resp.json()["symbol"] == "AAPL"
+
+
+def test_retrain_overwrites_previous_forecast(isolated_db: Path) -> None:
+    """Re-training replaces the persisted row wholesale (upsert semantics)."""
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+
+    with TestClient(app) as client:
+        resp1 = client.post("/api/forecast/AAPL/retrain/")
+        assert resp1.status_code == 200
+        gen1 = resp1.json()["generated_at"]
+
+        # Second retrain — ``generated_at`` advances, only one row in ``forecasts``.
+        resp2 = client.post("/api/forecast/AAPL/retrain/")
+        assert resp2.status_code == 200
+        gen2 = resp2.json()["generated_at"]
+        assert gen2 >= gen1  # monotonic non-decreasing within a session
+
+        avail = client.get("/api/forecast/").json()
+        assert avail["persisted"] == ["AAPL"]  # still exactly one
+
+
+# ---------------------------------------------------------------------------
+# Engine selection on retrain
+# ---------------------------------------------------------------------------
+
+
+def test_retrain_default_engine_is_sarimax(isolated_db: Path) -> None:
+    """No ``engine=`` param → SARIMAX (the historical default)."""
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        resp = client.post("/api/forecast/AAPL/retrain/")
+        assert resp.status_code == 200
+        assert "SARIMAX" in resp.json()["model"]
+
+
+def test_retrain_with_explicit_engine_uses_holt_winters(
+    isolated_db: Path,
+) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/forecast/AAPL/retrain/", params={"engine": "holt_winters"}
+        )
+        assert resp.status_code == 200
+        assert "Holt-Winters" in resp.json()["model"]
+
+
+def test_retrain_unknown_engine_returns_422(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/forecast/AAPL/retrain/", params={"engine": "prophet"}
+        )
+        assert resp.status_code == 422
+        assert "prophet" in resp.json()["detail"].lower()
+
+
+def test_availability_returns_engine_list(isolated_db: Path) -> None:
+    """The availability endpoint exposes the canonical engine literals so the
+    UI selector doesn't have to hard-code them."""
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/")
+        body = resp.json()
+        assert body["engines"] == ["sarimax", "holt_winters"]
+
+
+# ---------------------------------------------------------------------------
+# Bulk admin endpoints (Settings → ML controls)
+# ---------------------------------------------------------------------------
+
+
+def test_retrain_all_returns_counts(isolated_db: Path) -> None:
+    """Two eligible assets, one with enough rows to actually fit, one not."""
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    _seed_asset_with_daily_closes("MSFT", n_rows=10)
+
+    with TestClient(app) as client:
+        resp = client.post("/api/forecast/retrain-all/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["requested"] == 2
+        assert body["trained"] == 1
+        assert body["skipped"] == 1
+        assert body["engine"] in {"sarimax", "holt_winters"}
+
+
+def test_retrain_all_with_explicit_engine(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/forecast/retrain-all/", params={"engine": "holt_winters"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["engine"] == "holt_winters"
+
+        # The persisted forecast is from the requested engine.
+        forecast = client.get("/api/forecast/AAPL/").json()
+        assert "Holt-Winters" in forecast["model"]
+
+
+def test_retrain_all_no_eligible_assets_returns_zeros(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.post("/api/forecast/retrain-all/")
+        body = resp.json()
+        assert body["requested"] == 0
+        assert body["trained"] == 0
+        assert body["skipped"] == 0
+
+
+def test_clear_all_forecasts_wipes_persisted(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        # Seed one persisted forecast first.
+        client.post("/api/forecast/AAPL/retrain/")
+        avail_before = client.get("/api/forecast/").json()
+        assert avail_before["persisted"] == ["AAPL"]
+
+        resp = client.delete("/api/forecast/")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 1
+
+        avail_after = client.get("/api/forecast/").json()
+        assert avail_after["persisted"] == []
+        # Eligibility is unchanged — clearing forecasts doesn't touch
+        # price_points.
+        assert avail_after["eligible"] == ["AAPL"]
+
+
+def test_clear_all_forecasts_with_no_rows_returns_zero(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.delete("/api/forecast/")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Accuracy endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_accuracy_unknown_symbol_returns_empty_report(isolated_db: Path) -> None:
+    """No 404 — the endpoint returns an empty AccuracyReport so the UI can
+    render a "no accuracy data yet" hint without a separate error path."""
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/NOPE/accuracy/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["symbol"] == "NOPE"
+        assert body["per_engine"] == []
+        assert body["overall"] is None
+        assert body["actuals_available"] == 0
+
+
+def test_accuracy_no_snapshots_returns_empty_report(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/AAPL/accuracy/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["per_engine"] == []
+        assert body["actuals_available"] > 0
+
+
+def test_accuracy_returns_per_engine_after_retrains(isolated_db: Path) -> None:
+    """Train both engines, then check the accuracy endpoint sees both."""
+    _seed_asset_with_daily_closes("AAPL", n_rows=80)
+    with TestClient(app) as client:
+        client.post("/api/forecast/AAPL/retrain/", params={"engine": "sarimax"})
+        client.post(
+            "/api/forecast/AAPL/retrain/", params={"engine": "holt_winters"}
+        )
+
+        resp = client.get("/api/forecast/AAPL/accuracy/", params={"days": 365})
+        assert resp.status_code == 200
+        body = resp.json()
+        engines = [e["engine"] for e in body["per_engine"]]
+        # Both engines have a snapshot row, even if their horizons haven't
+        # all elapsed yet.
+        assert any("SARIMAX" in e for e in engines)
+        assert any("Holt-Winters" in e for e in engines)
+        # Snapshots tally across the run.
+        total_snapshots = sum(e["snapshots"] for e in body["per_engine"])
+        assert total_snapshots == 2
+
+
+def test_accuracy_days_validation(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        assert (
+            client.get("/api/forecast/AAPL/accuracy/", params={"days": 0}).status_code
+            == 422
+        )
+        assert (
+            client.get(
+                "/api/forecast/AAPL/accuracy/", params={"days": 999}
+            ).status_code
+            == 422
+        )
+
+
+# ---------------------------------------------------------------------------
+# Volatility endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_volatility_unknown_symbol_returns_empty_report(isolated_db: Path) -> None:
+    """Parallel to the accuracy endpoint — unknown symbols don't 404; they
+    return an empty report so the UI can hide the panel without a
+    separate error branch."""
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/NOPE/volatility/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["symbol"] == "NOPE"
+        assert body["returns_used"] == 0
+        assert body["realized_vol_daily"] is None
+        assert body["realized_vol_annualized"] is None
+        assert body["ewma_next_day_vol"] is None
+
+
+def test_volatility_too_few_bars_returns_partial(isolated_db: Path) -> None:
+    """Asset has only a couple of daily bars → metrics are None but
+    last_close is surfaced.
+
+    Seed with a start date close to today so the bars fall inside the
+    default 30-day lookback window — ``_seed_asset_with_daily_closes``
+    anchors at 2024-01-01, which is fine for accuracy tests (which
+    compute over the full snapshot history) but stale for any
+    last-N-days computation.
+    """
+    _seed_asset_with_daily_closes(
+        "AAPL", n_rows=2, start=date.today() - timedelta(days=2)
+    )
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/AAPL/volatility/")
+        assert resp.status_code == 200
+        body = resp.json()
+        # 2 closes → 1 return → below MIN_RETURNS_FOR_VOL.
+        assert body["realized_vol_daily"] is None
+        assert body["last_close"] is not None
+
+
+def test_volatility_with_history_returns_metrics(isolated_db: Path) -> None:
+    """Plenty of history inside the default lookback → all metrics
+    populated, with a sanity check on the annualization relationship."""
+    _seed_asset_with_daily_closes(
+        "AAPL", n_rows=80, start=date.today() - timedelta(days=80)
+    )
+    with TestClient(app) as client:
+        resp = client.get("/api/forecast/AAPL/volatility/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["returns_used"] >= 5
+        assert body["last_close"] is not None
+        assert body["realized_vol_daily"] is not None
+        assert body["realized_vol_annualized"] is not None
+        assert body["ewma_next_day_vol"] is not None
+        # Annualization relationship.
+        assert body["realized_vol_annualized"] == pytest.approx(
+            body["realized_vol_daily"] * (252 ** 0.5), rel=1e-6
+        )
+        # Expected-move band is centred on last_close.
+        midpoint = (body["expected_move_low"] + body["expected_move_high"]) / 2
+        assert midpoint == pytest.approx(body["last_close"], abs=1e-6)
+
+
+def test_volatility_lookback_validation(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        assert (
+            client.get(
+                "/api/forecast/AAPL/volatility/", params={"lookback_days": 1}
+            ).status_code
+            == 422
+        )
+        assert (
+            client.get(
+                "/api/forecast/AAPL/volatility/", params={"lookback_days": 9999}
+            ).status_code
+            == 422
+        )

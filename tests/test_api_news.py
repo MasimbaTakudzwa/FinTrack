@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -154,3 +155,280 @@ def test_list_news_limit_validation(isolated_db: Path) -> None:
     with session_scope() as s:
         assert s.execute(select(Article)).scalar() is not None
         assert s.execute(select(ArticleAsset)).first() is not None
+
+
+# ---------------------------------------------------------------------------
+# Sentiment surfaces
+# ---------------------------------------------------------------------------
+
+
+def _seed_with_sentiment() -> None:
+    """Seed AAPL with three articles spanning the sentiment buckets."""
+    with session_scope() as s:
+        aapl = Asset(symbol="AAPL", name="Apple Inc.", asset_type=AssetType.STOCK)
+        s.add(aapl)
+        s.flush()
+        base = datetime(2026, 4, 22, 12, 0, tzinfo=UTC)
+        rows = [
+            ("https://t/p", "Excellent results", base, 0.7),
+            ("https://t/n", "Tragic failure", base + timedelta(hours=1), -0.6),
+            ("https://t/m", "Wire report published", base + timedelta(hours=2), 0.0),
+            ("https://t/u", "Unscored backlog", base + timedelta(hours=3), None),
+        ]
+        for url, headline, ts, sentiment in rows:
+            article = Article(
+                url=url,
+                headline=headline,
+                source="Yahoo Finance",
+                published_at=ts,
+                sentiment=sentiment,
+            )
+            s.add(article)
+            s.flush()
+            s.add(ArticleAsset(article_id=article.id, asset_id=aapl.id))
+
+
+def test_list_news_returns_sentiment_field(isolated_db: Path) -> None:
+    _seed_with_sentiment()
+    with TestClient(app) as client:
+        resp = client.get("/api/news/")
+        assert resp.status_code == 200
+        data = resp.json()
+        by_url = {a["url"]: a for a in data["articles"]}
+        assert by_url["https://t/p"]["sentiment"] == pytest.approx(0.7)
+        assert by_url["https://t/n"]["sentiment"] == pytest.approx(-0.6)
+        assert by_url["https://t/m"]["sentiment"] == 0.0
+        assert by_url["https://t/u"]["sentiment"] is None
+
+
+def test_list_news_filter_positive(isolated_db: Path) -> None:
+    _seed_with_sentiment()
+    with TestClient(app) as client:
+        resp = client.get("/api/news/", params={"sentiment": "positive"})
+        assert resp.status_code == 200
+        urls = {a["url"] for a in resp.json()["articles"]}
+        assert urls == {"https://t/p"}
+
+
+def test_list_news_filter_negative(isolated_db: Path) -> None:
+    _seed_with_sentiment()
+    with TestClient(app) as client:
+        resp = client.get("/api/news/", params={"sentiment": "negative"})
+        urls = {a["url"] for a in resp.json()["articles"]}
+        assert urls == {"https://t/n"}
+
+
+def test_list_news_filter_neutral_excludes_unscored(isolated_db: Path) -> None:
+    _seed_with_sentiment()
+    with TestClient(app) as client:
+        resp = client.get("/api/news/", params={"sentiment": "neutral"})
+        urls = {a["url"] for a in resp.json()["articles"]}
+        # Only the explicitly-neutral row; unscored is excluded by design.
+        assert urls == {"https://t/m"}
+
+
+def test_list_news_invalid_sentiment_value_422(isolated_db: Path) -> None:
+    _seed_with_sentiment()
+    with TestClient(app) as client:
+        resp = client.get("/api/news/", params={"sentiment": "ecstatic"})
+        assert resp.status_code == 422
+
+
+def test_sentiment_summary_returns_aggregates(isolated_db: Path) -> None:
+    _seed_with_sentiment()
+    with TestClient(app) as client:
+        resp = client.get("/api/news/sentiment-summary/AAPL/", params={"days": 365})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["symbol"] == "AAPL"
+        assert body["days"] == 365
+        assert body["total"] == 4
+        assert body["scored"] == 3
+        assert body["unscored"] == 1
+        assert body["positive"] == 1
+        assert body["negative"] == 1
+        assert body["neutral"] == 1
+        # mean over scored: (0.7 + -0.6 + 0.0) / 3 ≈ 0.0333
+        assert body["mean"] is not None
+        assert body["mean"] == pytest.approx(0.0333, abs=1e-3)
+
+
+def test_sentiment_summary_unknown_symbol_404(isolated_db: Path) -> None:
+    _seed_with_sentiment()
+    with TestClient(app) as client:
+        resp = client.get("/api/news/sentiment-summary/NOPE/")
+        assert resp.status_code == 404
+
+
+def test_sentiment_summary_case_insensitive(isolated_db: Path) -> None:
+    _seed_with_sentiment()
+    with TestClient(app) as client:
+        resp = client.get("/api/news/sentiment-summary/aapl/")
+        assert resp.status_code == 200
+        assert resp.json()["symbol"] == "AAPL"
+
+
+def test_sentiment_summary_empty_window_returns_zeros(isolated_db: Path) -> None:
+    _seed_with_sentiment()
+    with TestClient(app) as client:
+        # Articles seeded at 2026-04-22 — a 1-day window from "now" excludes them.
+        resp = client.get("/api/news/sentiment-summary/AAPL/", params={"days": 1})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 0
+        assert body["scored"] == 0
+        assert body["mean"] is None
+
+
+def test_sentiment_summary_days_validation(isolated_db: Path) -> None:
+    _seed_with_sentiment()
+    with TestClient(app) as client:
+        assert client.get(
+            "/api/news/sentiment-summary/AAPL/", params={"days": 0}
+        ).status_code == 422
+        assert client.get(
+            "/api/news/sentiment-summary/AAPL/", params={"days": 999}
+        ).status_code == 422
+
+
+def _seed_for_timeseries() -> None:
+    """Seed AAPL with five scored articles over three calendar days, plus
+    one unscored row that must NOT contribute to the daily averages."""
+    with session_scope() as s:
+        aapl = Asset(symbol="AAPL", name="Apple Inc.", asset_type=AssetType.STOCK)
+        s.add(aapl)
+        s.flush()
+        # Day 1: two articles, mean = (0.5 + -0.1) / 2 = 0.2
+        # Day 2: one article, mean = 0.4
+        # Day 3: two articles, mean = (-0.3 + -0.7) / 2 = -0.5
+        # Plus an unscored article on Day 2 that should be ignored entirely.
+        rows = [
+            ("https://t/d1a", datetime(2026, 4, 20, 9, 0, tzinfo=UTC), 0.5),
+            ("https://t/d1b", datetime(2026, 4, 20, 15, 0, tzinfo=UTC), -0.1),
+            ("https://t/d2a", datetime(2026, 4, 21, 12, 0, tzinfo=UTC), 0.4),
+            ("https://t/d2u", datetime(2026, 4, 21, 14, 0, tzinfo=UTC), None),
+            ("https://t/d3a", datetime(2026, 4, 22, 10, 0, tzinfo=UTC), -0.3),
+            ("https://t/d3b", datetime(2026, 4, 22, 16, 0, tzinfo=UTC), -0.7),
+        ]
+        for url, ts, sentiment in rows:
+            article = Article(
+                url=url,
+                headline="x",
+                source="Yahoo Finance",
+                published_at=ts,
+                sentiment=sentiment,
+            )
+            s.add(article)
+            s.flush()
+            s.add(ArticleAsset(article_id=article.id, asset_id=aapl.id))
+
+
+def test_sentiment_timeseries_aggregates_per_day(isolated_db: Path) -> None:
+    _seed_for_timeseries()
+    with TestClient(app) as client:
+        resp = client.get(
+            "/api/news/sentiment-timeseries/AAPL/", params={"days": 365}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["symbol"] == "AAPL"
+        assert body["days"] == 365
+        # Three days with scored articles (the 4th had only an unscored row,
+        # so it's excluded entirely from the timeseries).
+        assert len(body["points"]) == 3
+
+        # Ordered ascending by date
+        dates = [p["date"] for p in body["points"]]
+        assert dates == sorted(dates)
+        # Spot-check the means we constructed
+        by_date = {p["date"]: p for p in body["points"]}
+        assert by_date["2026-04-20"]["count"] == 2
+        assert by_date["2026-04-20"]["mean"] == pytest.approx(0.2, abs=1e-6)
+        assert by_date["2026-04-21"]["count"] == 1
+        assert by_date["2026-04-21"]["mean"] == pytest.approx(0.4, abs=1e-6)
+        assert by_date["2026-04-22"]["count"] == 2
+        assert by_date["2026-04-22"]["mean"] == pytest.approx(-0.5, abs=1e-6)
+
+
+def test_sentiment_timeseries_empty_returns_no_points(isolated_db: Path) -> None:
+    with session_scope() as s:
+        s.add(Asset(symbol="AAPL", name="Apple", asset_type=AssetType.STOCK))
+
+    with TestClient(app) as client:
+        resp = client.get("/api/news/sentiment-timeseries/AAPL/")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["points"] == []
+
+
+def test_sentiment_timeseries_unknown_symbol_404(isolated_db: Path) -> None:
+    _seed_for_timeseries()
+    with TestClient(app) as client:
+        resp = client.get("/api/news/sentiment-timeseries/NOPE/")
+        assert resp.status_code == 404
+
+
+def test_sentiment_timeseries_excludes_unscored_articles(isolated_db: Path) -> None:
+    """An unscored article on a day with no other articles → that day is absent."""
+    with session_scope() as s:
+        aapl = Asset(symbol="AAPL", name="Apple Inc.", asset_type=AssetType.STOCK)
+        s.add(aapl)
+        s.flush()
+        article = Article(
+            url="https://t/u",
+            headline="unscored",
+            source="Yahoo Finance",
+            published_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+            sentiment=None,
+        )
+        s.add(article)
+        s.flush()
+        s.add(ArticleAsset(article_id=article.id, asset_id=aapl.id))
+
+    with TestClient(app) as client:
+        resp = client.get(
+            "/api/news/sentiment-timeseries/AAPL/", params={"days": 365}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["points"] == []
+
+
+def test_sentiment_timeseries_days_validation(isolated_db: Path) -> None:
+    _seed_for_timeseries()
+    with TestClient(app) as client:
+        assert client.get(
+            "/api/news/sentiment-timeseries/AAPL/", params={"days": 0}
+        ).status_code == 422
+        assert client.get(
+            "/api/news/sentiment-timeseries/AAPL/", params={"days": 999}
+        ).status_code == 422
+
+
+def test_score_now_runs_backfill_and_returns_count(isolated_db: Path) -> None:
+    """Settings → ML controls "Score articles now" button kicks the backfill
+    synchronously and reports how many rows it scored."""
+    with session_scope() as s:
+        article = Article(
+            url="https://t/x",
+            headline="Outstanding earnings beat",
+            source="Yahoo Finance",
+            published_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            sentiment=None,
+        )
+        s.add(article)
+
+    with TestClient(app) as client:
+        resp = client.post("/api/news/score-now/")
+        assert resp.status_code == 200
+        assert resp.json()["scored"] == 1
+
+    with session_scope() as s:
+        row = s.execute(select(Article)).scalar_one()
+        assert row.sentiment is not None
+
+
+def test_score_now_with_no_unscored_returns_zero(isolated_db: Path) -> None:
+    with TestClient(app) as client:
+        resp = client.post("/api/news/score-now/")
+        assert resp.status_code == 200
+        assert resp.json()["scored"] == 0

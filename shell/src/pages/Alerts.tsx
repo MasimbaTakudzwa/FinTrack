@@ -285,6 +285,11 @@ export function Alerts() {
                       </div>
                     </td>
                     <td className="px-4 py-3 text-right font-mono tabular-nums text-zinc-800 dark:text-zinc-200">
+                      {a.metric === "sentiment" && (
+                        <span className="mr-1 rounded bg-indigo-100 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+                          {a.window_days ?? "?"}d sent
+                        </span>
+                      )}
                       <span className="text-[11px] uppercase text-zinc-400 dark:text-zinc-500">
                         {direction}
                       </span>{" "}

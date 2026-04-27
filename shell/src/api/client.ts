@@ -69,19 +69,24 @@ async function apiPost<T, B>(
 }
 
 async function apiJson<T, B>(
-  method: "POST" | "PUT",
+  method: "POST" | "PUT" | "DELETE",
   path: string,
   body: B,
   opts: { signal?: AbortSignal },
 ): Promise<T> {
   const base = await getBaseUrl();
   const url = `${base}${path}`;
-  const res = await fetch(url, {
+  // DELETE goes without a JSON body — typical REST convention. POST/PUT
+  // send the JSON payload as-is.
+  const init: RequestInit = {
     method,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
     signal: opts.signal,
-  });
+  };
+  if (method !== "DELETE") {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(url, init);
   if (!res.ok) {
     throw new ApiError(res.status, url, `${method} ${path} → ${await _detail(res, method, path)}`);
   }
@@ -324,6 +329,8 @@ export function getMacroSeries(
 
 // ---------- News ----------
 
+export type SentimentBucket = "positive" | "neutral" | "negative";
+
 export interface Article {
   id: number;
   url: string;
@@ -331,6 +338,8 @@ export interface Article {
   source: string;
   published_at: string; // ISO 8601 — treat as UTC
   summary: string | null;
+  /** VADER compound score in [-1, +1]; null = not yet scored. */
+  sentiment: number | null;
   symbols: string[];
 }
 
@@ -339,11 +348,25 @@ export interface ArticleList {
   articles: Article[];
 }
 
+export interface SentimentSummary {
+  symbol: string;
+  days: number;
+  total: number;
+  scored: number;
+  unscored: number;
+  positive: number;
+  neutral: number;
+  negative: number;
+  /** Average compound score across scored articles in window; null if none. */
+  mean: number | null;
+}
+
 export function listNews(
   opts: {
     symbol?: string;
     from?: string;
     to?: string;
+    sentiment?: SentimentBucket;
     limit?: number;
     signal?: AbortSignal;
   } = {},
@@ -353,10 +376,62 @@ export function listNews(
       symbol: opts.symbol,
       from: opts.from,
       to: opts.to,
+      sentiment: opts.sentiment,
       limit: opts.limit,
     },
     signal: opts.signal,
   });
+}
+
+export function getSentimentSummary(
+  symbol: string,
+  opts: { days?: number; signal?: AbortSignal } = {},
+): Promise<SentimentSummary> {
+  return apiGet<SentimentSummary>(
+    `/api/news/sentiment-summary/${encodeURIComponent(symbol)}/`,
+    {
+      params: { days: opts.days ?? 7 },
+      signal: opts.signal,
+    },
+  );
+}
+
+export interface SentimentTimeseriesPoint {
+  date: string; // YYYY-MM-DD UTC
+  mean: number;
+  count: number;
+}
+
+export interface SentimentTimeseries {
+  symbol: string;
+  days: number;
+  points: SentimentTimeseriesPoint[];
+}
+
+/** Daily-bucketed mean compound score for one asset; powers the
+ *  "sentiment vs price" overlay on AssetDetail. */
+export function getSentimentTimeseries(
+  symbol: string,
+  opts: { days?: number; signal?: AbortSignal } = {},
+): Promise<SentimentTimeseries> {
+  return apiGet<SentimentTimeseries>(
+    `/api/news/sentiment-timeseries/${encodeURIComponent(symbol)}/`,
+    {
+      params: { days: opts.days ?? 30 },
+      signal: opts.signal,
+    },
+  );
+}
+
+/** VADER-conventional thresholds — match `ml.sentiment` constants. */
+export const SENTIMENT_POSITIVE_THRESHOLD = 0.05;
+export const SENTIMENT_NEGATIVE_THRESHOLD = -0.05;
+
+export function classifySentiment(score: number | null): SentimentBucket {
+  if (score === null) return "neutral";
+  if (score >= SENTIMENT_POSITIVE_THRESHOLD) return "positive";
+  if (score <= SENTIMENT_NEGATIVE_THRESHOLD) return "negative";
+  return "neutral";
 }
 
 // ---------- Config / runtime settings ----------
@@ -378,6 +453,9 @@ export interface SettingEntry {
   max: number | null;
   /** For secrets: whether any value is set (env or db). Always true otherwise. */
   has_value: boolean;
+  /** When set, the UI renders this as a select with these literal options
+   *  instead of a free-form input. STRING-typed settings only. */
+  allowed_values: string[] | null;
 }
 
 export interface ReadonlyConfig {
@@ -520,6 +598,7 @@ export function reorderWatchlistItems(
 // ---------- Price Alerts ----------
 
 export type AlertDirection = "above" | "below";
+export type AlertMetric = "price" | "sentiment";
 
 export interface PriceAlert {
   id: number;
@@ -528,6 +607,11 @@ export interface PriceAlert {
   asset_name: string;
   threshold: string; // Decimal-as-string
   direction: AlertDirection;
+  /** Which signal the alert thresholds. "price" → latest close;
+   *  "sentiment" → rolling-mean compound score over `window_days`. */
+  metric: AlertMetric;
+  /** Rolling-window length in days for sentiment alerts. Null otherwise. */
+  window_days: number | null;
   is_active: boolean;
   triggered_at: string | null; // ISO 8601 or null
   notified_at: string | null;
@@ -535,6 +619,9 @@ export interface PriceAlert {
   created_at: string;
   last_price: string | null; // Decimal-as-string, null if no bars yet
   last_price_at: string | null;
+  /** The metric's most recent observed value (latest close for price
+   *  alerts, rolling-mean sentiment for sentiment alerts). */
+  current_value: string | null;
 }
 
 export interface AlertList {
@@ -576,6 +663,10 @@ export interface CreateAlertBody {
   threshold: string | number;
   direction: AlertDirection;
   note?: string | null;
+  /** Default "price". Set to "sentiment" + provide `window_days` to
+   *  fire on rolling-mean sentiment crossings instead of price ones. */
+  metric?: AlertMetric;
+  window_days?: number | null;
 }
 
 export function createAlert(
@@ -613,6 +704,423 @@ export function markAlertNotified(
 ): Promise<PriceAlert> {
   return apiPost<PriceAlert, Record<string, never>>(
     `/api/alerts/${id}/mark-notified/`,
+    {},
+    { signal },
+  );
+}
+
+// ---------- Portfolio ----------
+
+export type TransactionType = "buy" | "sell";
+
+export interface PortfolioTransaction {
+  id: number;
+  asset_id: number;
+  symbol: string;
+  asset_name: string;
+  transaction_type: TransactionType;
+  quantity: string; // Decimal-as-string
+  price_per_unit: string;
+  transaction_date: string; // YYYY-MM-DD
+  fee: string;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface PortfolioPosition {
+  asset_id: number;
+  symbol: string;
+  asset_name: string;
+  quantity: string;
+  avg_cost: string;
+  cost_basis: string;
+  realized_pl: string;
+  last_close: string | null;
+  last_close_at: string | null;
+  current_value: string | null;
+  unrealized_pl: string | null;
+  unrealized_pl_pct: string | null;
+  transaction_count: number;
+}
+
+export interface PortfolioSummary {
+  total_cost_basis: string;
+  total_current_value: string;
+  total_unrealized_pl: string;
+  total_unrealized_pl_pct: string | null;
+  total_realized_pl: string;
+  open_positions: number;
+}
+
+export interface CreateTransactionBody {
+  asset_id: number;
+  transaction_type: TransactionType;
+  quantity: string | number;
+  price_per_unit: string | number;
+  transaction_date: string; // YYYY-MM-DD
+  fee?: string | number;
+  notes?: string | null;
+}
+
+export function listPortfolioTransactions(
+  opts: { assetId?: number; signal?: AbortSignal } = {},
+): Promise<{ count: number; transactions: PortfolioTransaction[] }> {
+  return apiGet("/api/portfolio/transactions/", {
+    params: { asset_id: opts.assetId },
+    signal: opts.signal,
+  });
+}
+
+export function createPortfolioTransaction(
+  body: CreateTransactionBody,
+  signal?: AbortSignal,
+): Promise<PortfolioTransaction> {
+  return apiPost<PortfolioTransaction, CreateTransactionBody>(
+    "/api/portfolio/transactions/",
+    body,
+    { signal },
+  );
+}
+
+export interface UpdateTransactionBody {
+  transaction_type?: TransactionType;
+  quantity?: string | number;
+  price_per_unit?: string | number;
+  transaction_date?: string;
+  fee?: string | number;
+  notes?: string | null;
+}
+
+export function updatePortfolioTransaction(
+  id: number,
+  body: UpdateTransactionBody,
+  signal?: AbortSignal,
+): Promise<PortfolioTransaction> {
+  return apiPut<PortfolioTransaction, UpdateTransactionBody>(
+    `/api/portfolio/transactions/${id}/`,
+    body,
+    { signal },
+  );
+}
+
+export function deletePortfolioTransaction(
+  id: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  return apiDelete(`/api/portfolio/transactions/${id}/`, { signal });
+}
+
+export function listPortfolioPositions(
+  signal?: AbortSignal,
+): Promise<{ count: number; positions: PortfolioPosition[] }> {
+  return apiGet("/api/portfolio/positions/", { signal });
+}
+
+export function getPortfolioSummary(
+  signal?: AbortSignal,
+): Promise<PortfolioSummary> {
+  return apiGet("/api/portfolio/summary/", { signal });
+}
+
+export interface PerformancePoint {
+  date: string; // YYYY-MM-DD
+  value: string;
+  cost_basis: string;
+  realized_pl: string;
+}
+
+export interface PortfolioPerformance {
+  lookback_days: number;
+  points: PerformancePoint[];
+}
+
+export function getPortfolioPerformance(
+  opts: { lookbackDays?: number; signal?: AbortSignal } = {},
+): Promise<PortfolioPerformance> {
+  return apiGet<PortfolioPerformance>("/api/portfolio/performance/", {
+    params: { lookback_days: opts.lookbackDays ?? 90 },
+    signal: opts.signal,
+  });
+}
+
+export interface ImportResult {
+  inserted: number;
+  skipped: number;
+  errors: { row: number; message: string }[];
+}
+
+/**
+ * Bulk-import transactions from a CSV body. Per-row failures are
+ * accumulated rather than aborting the import; the caller renders
+ * partial-success output. Round-trip compatible with
+ * `exportPortfolioTransactionsCsv` for backup / restore.
+ */
+export function importPortfolioTransactionsCsv(
+  csv: string,
+  signal?: AbortSignal,
+): Promise<ImportResult> {
+  return apiPost<ImportResult, { csv: string }>(
+    "/api/portfolio/transactions/import",
+    { csv },
+    { signal },
+  );
+}
+
+/**
+ * Fetch the transactions-export CSV as a Blob. Caller is responsible
+ * for triggering the browser download via an anchor + URL.createObjectURL
+ * — Tauri's WebView2/WKWebView don't auto-handle Content-Disposition
+ * attachments the way a stock browser does.
+ */
+export async function exportPortfolioTransactionsCsv(
+  signal?: AbortSignal,
+): Promise<{ blob: Blob; filename: string }> {
+  const base = await getBaseUrl();
+  const url = `${base}/api/portfolio/transactions/export.csv`;
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    throw new ApiError(res.status, url, `GET ${url} → HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  // Pull the server-suggested filename out of Content-Disposition;
+  // fall back to a sensible default if the header isn't surfaced
+  // (some webviews strip it).
+  const cd = res.headers.get("content-disposition") ?? "";
+  const match = cd.match(/filename="([^"]+)"/);
+  const filename =
+    match?.[1] ??
+    `fintrack-transactions-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.csv`;
+  return { blob, filename };
+}
+
+// ---------- Forecast ----------
+
+/** Server-supported engines. Stays as a literal union here so the UI can
+ *  present a typed selector without doing its own validation. */
+export type ForecastEngine = "sarimax" | "holt_winters";
+
+export interface ForecastPoint {
+  forecast_date: string; // YYYY-MM-DD
+  yhat: number;
+  lower_80: number;
+  upper_80: number;
+  lower_95: number;
+  upper_95: number;
+}
+
+export interface Forecast {
+  symbol: string;
+  asset_id: number;
+  model: string;
+  horizon_days: number;
+  training_rows: number;
+  last_close: string; // Decimal → serialised as string by Pydantic
+  last_close_date: string; // YYYY-MM-DD
+  generated_at: string; // ISO 8601 (may lack tz — treat as UTC)
+  points: ForecastPoint[];
+}
+
+export interface ForecastAvailability {
+  eligible: string[];
+  persisted: string[];
+  /** Canonical list of engines the backend will accept (empty until the
+   *  endpoint is reached at least once on a fresh install). */
+  engines: string[];
+}
+
+export interface RetrainAllResult {
+  requested: number;
+  trained: number;
+  skipped: number;
+  engine: string;
+}
+
+export interface ClearForecastsResult {
+  deleted: number;
+}
+
+export interface ScoreNowResult {
+  scored: number;
+}
+
+export function listForecastAvailability(
+  signal?: AbortSignal,
+): Promise<ForecastAvailability> {
+  return apiGet<ForecastAvailability>("/api/forecast/", { signal });
+}
+
+export function getForecast(
+  symbol: string,
+  signal?: AbortSignal,
+): Promise<Forecast> {
+  return apiGet<Forecast>(`/api/forecast/${encodeURIComponent(symbol)}/`, {
+    signal,
+  });
+}
+
+export function retrainForecast(
+  symbol: string,
+  opts: { engine?: ForecastEngine | null; signal?: AbortSignal } = {},
+): Promise<Forecast> {
+  const qs = opts.engine ? `?engine=${encodeURIComponent(opts.engine)}` : "";
+  return apiPost<Forecast, Record<string, never>>(
+    `/api/forecast/${encodeURIComponent(symbol)}/retrain/${qs}`,
+    {},
+    { signal: opts.signal },
+  );
+}
+
+export interface EngineAccuracyEntry {
+  engine: string;
+  snapshots: number;
+  evaluable_points: number;
+  /** Mean absolute percentage error (null when no evaluable pairs yet). */
+  mape: number | null;
+  /** Root mean squared error in price units. */
+  rmse: number | null;
+  /** Fraction of forecasts that called direction correctly (0..1). */
+  directional: number | null;
+}
+
+export interface ForecastAccuracyReport {
+  symbol: string;
+  days: number;
+  per_engine: EngineAccuracyEntry[];
+  overall: EngineAccuracyEntry | null;
+  actuals_available: number;
+}
+
+/** Rolling forecast accuracy for one asset. Drives the "How accurate has
+ *  the forecaster been?" panel on AssetDetail and is the headline answer
+ *  to "should I switch engines?". */
+export function getForecastAccuracy(
+  symbol: string,
+  opts: { days?: number; signal?: AbortSignal } = {},
+): Promise<ForecastAccuracyReport> {
+  return apiGet<ForecastAccuracyReport>(
+    `/api/forecast/${encodeURIComponent(symbol)}/accuracy/`,
+    {
+      params: { days: opts.days ?? 30 },
+      signal: opts.signal,
+    },
+  );
+}
+
+export interface VolatilityReport {
+  symbol: string;
+  lookback_days: number;
+  returns_used: int;
+  last_close: number | null;
+  last_close_date: string | null; // YYYY-MM-DD
+  /** Daily realized vol — decimal proportion (0.012 == 1.2%). */
+  realized_vol_daily: number | null;
+  /** Annualised realized vol (daily × sqrt(252)). */
+  realized_vol_annualized: number | null;
+  /** EWMA next-day forecast vol — decimal proportion. */
+  ewma_next_day_vol: number | null;
+  /** ±1σ price-space band for the next trading day. */
+  expected_move_low: number | null;
+  expected_move_high: number | null;
+}
+
+// TS doesn't have a built-in `int`; alias to number so the field reads
+// closer to the wire schema.
+type int = number;
+
+/** Realized + EWMA-forecast volatility for a single asset. Drives the
+ *  "Risk profile" panel on AssetDetail. Returns metrics as decimal
+ *  proportions; UI formats as percentages. */
+export function getVolatility(
+  symbol: string,
+  opts: { lookbackDays?: number; signal?: AbortSignal } = {},
+): Promise<VolatilityReport> {
+  return apiGet<VolatilityReport>(
+    `/api/forecast/${encodeURIComponent(symbol)}/volatility/`,
+    {
+      params: { lookback_days: opts.lookbackDays ?? 30 },
+      signal: opts.signal,
+    },
+  );
+}
+
+// ---------- Analytics ----------
+
+export interface CorrelationCell {
+  symbol_a: string;
+  symbol_b: string;
+  /** Pearson r in [-1, +1]. */
+  coefficient: number;
+  /** Number of overlapping return-days backing the correlation. */
+  overlap: number;
+}
+
+export interface CorrelationMatrix {
+  symbols: string[];
+  lookback_days: number;
+  asset_count: number;
+  /** Server's own MIN_OVERLAP_DAYS threshold — UI fades cells below this. */
+  min_overlap_days: number;
+  /** Upper triangle + diagonal. UI mirrors when rendering the lower half. */
+  cells: CorrelationCell[];
+}
+
+export function getCorrelations(
+  opts: {
+    symbols: string[];
+    lookbackDays?: number;
+    signal?: AbortSignal;
+  },
+): Promise<CorrelationMatrix> {
+  return apiGet<CorrelationMatrix>("/api/analytics/correlations/", {
+    params: {
+      symbols: opts.symbols.join(","),
+      lookback_days: opts.lookbackDays ?? 90,
+    },
+    signal: opts.signal,
+  });
+}
+
+export function getDefaultWatchlistCorrelations(
+  opts: { lookbackDays?: number; signal?: AbortSignal } = {},
+): Promise<CorrelationMatrix> {
+  return apiGet<CorrelationMatrix>(
+    "/api/analytics/correlations/default-watchlist/",
+    {
+      params: { lookback_days: opts.lookbackDays ?? 90 },
+      signal: opts.signal,
+    },
+  );
+}
+
+export function retrainAllForecasts(
+  opts: { engine?: ForecastEngine | null; signal?: AbortSignal } = {},
+): Promise<RetrainAllResult> {
+  const qs = opts.engine ? `?engine=${encodeURIComponent(opts.engine)}` : "";
+  return apiPost<RetrainAllResult, Record<string, never>>(
+    `/api/forecast/retrain-all/${qs}`,
+    {},
+    { signal: opts.signal },
+  );
+}
+
+export function clearAllForecasts(
+  signal?: AbortSignal,
+): Promise<ClearForecastsResult> {
+  // The endpoint returns a JSON body (`{deleted: N}`) so we route through
+  // the JSON helper rather than the void-returning `apiDelete`.
+  return apiJson<ClearForecastsResult, Record<string, never>>(
+    "DELETE",
+    "/api/forecast/",
+    {},
+    { signal },
+  );
+}
+
+export function scoreArticlesNow(
+  signal?: AbortSignal,
+): Promise<ScoreNowResult> {
+  return apiPost<ScoreNowResult, Record<string, never>>(
+    "/api/news/score-now/",
     {},
     { signal },
   );

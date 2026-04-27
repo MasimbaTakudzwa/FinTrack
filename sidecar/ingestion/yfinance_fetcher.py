@@ -27,6 +27,7 @@ class PriceBar:
     low: Decimal
     close: Decimal
     volume: int
+    interval: str = "5m"
 
 
 class FetcherError(RuntimeError):
@@ -110,7 +111,7 @@ def _download(symbols: Sequence[str], *, period: str, interval: str) -> Any:
     raise FetcherError(f"yfinance download failed after {MAX_ATTEMPTS} attempts") from last_exc
 
 
-def _bars_for_symbol(symbol: str, frame: Any) -> list[PriceBar]:
+def _bars_for_symbol(symbol: str, frame: Any, interval: str) -> list[PriceBar]:
     if frame is None or frame.empty:
         return []
     bars: list[PriceBar] = []
@@ -131,6 +132,7 @@ def _bars_for_symbol(symbol: str, frame: Any) -> list[PriceBar]:
                 low=low,
                 close=c,
                 volume=_to_int_volume(row.get("Volume")),
+                interval=interval,
             )
         )
     return bars
@@ -172,5 +174,5 @@ def fetch_prices(
             else:
                 logger.warning("yfinance frame missing symbol %s", sym)
                 continue
-        all_bars.extend(_bars_for_symbol(sym, sub))
+        all_bars.extend(_bars_for_symbol(sym, sub, interval))
     return all_bars

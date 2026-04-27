@@ -130,3 +130,83 @@ def test_ingest_news_with_no_assets_skips(
     linked = jobs.ingest_news()
     assert linked == 0
     assert called["count"] == 0  # short-circuited before fetching
+
+
+def test_ingest_news_scores_new_articles_inline(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Newly inserted articles get a sentiment score on the same call."""
+    _seed_assets()
+    items = [
+        NewsItem(
+            url="https://t/positive",
+            headline="Outstanding results, brilliant performance",
+            source="Yahoo Finance",
+            published_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            summary=None,
+            symbol="AAPL",
+        ),
+        NewsItem(
+            url="https://t/negative",
+            headline="Tragic catastrophic loss reported",
+            source="Yahoo Finance",
+            published_at=datetime(2026, 4, 22, 12, 1, tzinfo=UTC),
+            summary=None,
+            symbol="MSFT",
+        ),
+    ]
+
+    from sidecar.scheduler import jobs
+
+    monkeypatch.setattr(jobs, "fetch_news_for_many", lambda symbols: items)
+
+    jobs.ingest_news()
+
+    with session_scope() as s:
+        rows = s.execute(select(Article)).scalars().all()
+        by_url = {a.url: a for a in rows}
+        assert by_url["https://t/positive"].sentiment is not None
+        assert by_url["https://t/positive"].sentiment > 0
+        assert by_url["https://t/negative"].sentiment is not None
+        assert by_url["https://t/negative"].sentiment < 0
+
+
+def test_ingest_news_does_not_rescore_existing(
+    isolated_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An article that already has a sentiment score is left untouched."""
+    _seed_assets()
+
+    # Pre-seed an article with a known score, then re-ingest the same URL.
+    pre_url = "https://t/preseeded"
+    with session_scope() as s:
+        article = Article(
+            url=pre_url,
+            headline="Anything goes here",
+            source="Yahoo Finance",
+            published_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+            sentiment=0.42,
+        )
+        s.add(article)
+
+    duplicate = NewsItem(
+        url=pre_url,
+        headline="Different headline (would score differently)",
+        source="Yahoo Finance",
+        published_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+        summary=None,
+        symbol="AAPL",
+    )
+
+    from sidecar.scheduler import jobs
+
+    monkeypatch.setattr(jobs, "fetch_news_for_many", lambda symbols: [duplicate])
+
+    jobs.ingest_news()
+
+    with session_scope() as s:
+        row = s.execute(
+            select(Article).where(Article.url == pre_url)
+        ).scalar_one()
+        # Score preserved exactly — VADER didn't re-run on this article.
+        assert row.sentiment == 0.42

@@ -40,9 +40,17 @@ DEFAULT_CONFIG = {
     "ingest_news.enabled": True,
     "ingest_news.interval_minutes": 15,
     "ingest_macro.cron_hour_utc": 6,
+    "ingest_prices_daily.enabled": True,
+    "ingest_prices_daily.cron_hour_utc": 22,
+    "train_forecasts.enabled": True,
+    "train_forecasts.cron_day_of_week": 6,
+    "train_forecasts.cron_hour_utc": 23,
     "fred_api_key": "",
     "check_alerts.enabled": True,
     "check_alerts.interval_minutes": 1,
+    "score_news_sentiment.enabled": True,
+    "score_news_sentiment.interval_minutes": 60,
+    "forecast.default_engine": "sarimax",
 }
 
 
@@ -178,6 +186,136 @@ def test_register_jobs_does_not_refire_macro_on_reconfigure(
     # Cron fires at hour=10, minute=0 every day; next_run_time must match.
     assert job.next_run_time.hour == 10
     assert job.next_run_time.minute == 0
+
+
+def test_register_jobs_adds_ingest_prices_daily_by_default(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    job = paused_scheduler.get_job("ingest_prices_daily")
+    assert job is not None
+    assert any(
+        f.name == "hour" and "22" in str(f) for f in job.trigger.fields
+    )
+
+
+def test_register_jobs_removes_disabled_ingest_prices_daily(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    assert paused_scheduler.get_job("ingest_prices_daily") is not None
+
+    _register_jobs(
+        paused_scheduler,
+        dict(DEFAULT_CONFIG, **{"ingest_prices_daily.enabled": False}),
+    )
+    assert paused_scheduler.get_job("ingest_prices_daily") is None
+
+
+def test_register_jobs_fires_prices_daily_immediately_on_first_add(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    """First-add fire semantics for the daily backfill: a fresh install needs
+    the 5y history to land in seconds, not up to 24h later on the configured
+    cron hour.
+    """
+    before = datetime.now(UTC)
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    after = datetime.now(UTC)
+
+    job = paused_scheduler.get_job("ingest_prices_daily")
+    assert job is not None and job.next_run_time is not None
+    window = (before - timedelta(seconds=1), after + timedelta(seconds=1))
+    assert window[0] <= job.next_run_time <= window[1], (
+        "ingest_prices_daily next_run_time should be ~now on first-add"
+    )
+
+
+def test_register_jobs_does_not_refire_prices_daily_on_reconfigure(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    """On sidecar restart / reconfigure the existing job's schedule wins — we
+    don't want to re-fire the 5y download every time the user opens the app.
+    """
+    # First register — fire-on-first-add means next_run_time=now.
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    assert paused_scheduler.get_job("ingest_prices_daily") is not None
+
+    # Second register — job already exists, so we skip next_run_time.
+    _register_jobs(
+        paused_scheduler,
+        dict(DEFAULT_CONFIG, **{"ingest_prices_daily.cron_hour_utc": 4}),
+    )
+    job = paused_scheduler.get_job("ingest_prices_daily")
+    assert job is not None and job.next_run_time is not None
+    # Cron now fires at hour=4, minute=0 daily — natural next-fire must match.
+    assert job.next_run_time.hour == 4
+    assert job.next_run_time.minute == 0
+
+
+def test_register_jobs_adds_train_forecasts_by_default(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    job = paused_scheduler.get_job("train_forecasts")
+    assert job is not None
+    # Weekly cron fires on day_of_week=6 (Sunday) at hour=23 UTC.
+    assert any(
+        f.name == "day_of_week" and "6" in str(f) for f in job.trigger.fields
+    )
+    assert any(f.name == "hour" and "23" in str(f) for f in job.trigger.fields)
+
+
+def test_register_jobs_removes_disabled_train_forecasts(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    assert paused_scheduler.get_job("train_forecasts") is not None
+
+    _register_jobs(
+        paused_scheduler,
+        dict(DEFAULT_CONFIG, **{"train_forecasts.enabled": False}),
+    )
+    assert paused_scheduler.get_job("train_forecasts") is None
+
+
+def test_register_jobs_does_not_fire_train_forecasts_immediately(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    """SARIMAX retraining is CPU-intensive and shouldn't slam a fresh install.
+
+    Users who want a forecast right now can hit the "Retrain" button in the
+    UI — the weekly cron is explicitly opt-out of fire-on-first-add.
+    """
+    now = datetime.now(UTC)
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    job = paused_scheduler.get_job("train_forecasts")
+    assert job is not None and job.next_run_time is not None
+    # The cron's natural next-fire must be >= tomorrow's scheduled hour; it
+    # must not land within seconds of "now" like the fire-on-first-add jobs.
+    assert job.next_run_time > now + timedelta(minutes=1)
+
+
+def test_register_jobs_updates_train_forecasts_schedule(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    _register_jobs(
+        paused_scheduler,
+        dict(
+            DEFAULT_CONFIG,
+            **{
+                "train_forecasts.cron_day_of_week": 0,  # Monday
+                "train_forecasts.cron_hour_utc": 5,
+            },
+        ),
+    )
+    job = paused_scheduler.get_job("train_forecasts")
+    assert job is not None
+    assert any(
+        f.name == "day_of_week" and "0" in str(f) for f in job.trigger.fields
+    )
+    assert any(f.name == "hour" and "5" in str(f) for f in job.trigger.fields)
 
 
 def test_register_jobs_removes_disabled_crypto(

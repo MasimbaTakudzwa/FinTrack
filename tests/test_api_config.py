@@ -25,9 +25,17 @@ def test_get_config_returns_defaults(isolated_db: Path) -> None:
         "ingest_news.enabled",
         "ingest_news.interval_minutes",
         "ingest_macro.cron_hour_utc",
+        "ingest_prices_daily.enabled",
+        "ingest_prices_daily.cron_hour_utc",
+        "train_forecasts.enabled",
+        "train_forecasts.cron_day_of_week",
+        "train_forecasts.cron_hour_utc",
         "fred_api_key",
         "check_alerts.enabled",
         "check_alerts.interval_minutes",
+        "score_news_sentiment.enabled",
+        "score_news_sentiment.interval_minutes",
+        "forecast.default_engine",
     }
 
     by_key = {s["key"]: s for s in body["settings"]}
@@ -136,7 +144,7 @@ def test_put_empty_updates_noop(isolated_db: Path) -> None:
     r = client.put("/api/config/", json={"updates": {}})
     assert r.status_code == 200
     # Should return current state without error.
-    assert len(r.json()["settings"]) == 9
+    assert len(r.json()["settings"]) == 17
 
 
 def test_put_atomic_on_validation_failure(isolated_db: Path) -> None:

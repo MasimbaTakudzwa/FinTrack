@@ -1,6 +1,6 @@
 import { ExternalLink, Newspaper } from "lucide-react";
 import { Link } from "react-router-dom";
-import type { Article } from "../api/client";
+import { classifySentiment, type Article } from "../api/client";
 
 type Density = "compact" | "comfortable";
 
@@ -106,6 +106,7 @@ function NewsRow({
             <span title={article.published_at}>
               {formatRelative(article.published_at)}
             </span>
+            <SentimentChip sentiment={article.sentiment} />
             {visibleSymbols.length > 0 && (
               <>
                 <span>·</span>
@@ -126,6 +127,42 @@ function NewsRow({
         </div>
       </div>
     </li>
+  );
+}
+
+/** Compact colored chip showing the VADER bucket + raw score. */
+function SentimentChip({ sentiment }: { sentiment: number | null }) {
+  if (sentiment === null) {
+    return (
+      <>
+        <span>·</span>
+        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+          unscored
+        </span>
+      </>
+    );
+  }
+  const bucket = classifySentiment(sentiment);
+  const palette = {
+    positive:
+      "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300",
+    neutral:
+      "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
+    negative:
+      "bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-300",
+  }[bucket];
+  const sign = sentiment > 0 ? "+" : "";
+  return (
+    <>
+      <span>·</span>
+      <span
+        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${palette}`}
+        title={`VADER compound score: ${sentiment.toFixed(3)}`}
+      >
+        {bucket} {sign}
+        {sentiment.toFixed(2)}
+      </span>
+    </>
   );
 }
 

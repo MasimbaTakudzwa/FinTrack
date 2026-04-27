@@ -6,16 +6,22 @@ import {
   Monitor,
   Moon,
   RefreshCw,
+  Sparkles,
   Sun,
+  Trash2,
 } from "lucide-react";
 import {
   type AppConfig,
   type ConfigUpdateValue,
   type SettingEntry,
   type SettingSource,
+  clearAllForecasts,
   getConfig,
   putConfig,
+  retrainAllForecasts,
+  scoreArticlesNow,
 } from "../api/client";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { type ThemeMode, useSettings } from "../stores/useSettings";
 
 interface LoadState {
@@ -156,6 +162,14 @@ export function Settings() {
                 />
               ))}
             </div>
+          </section>
+
+          <section className="mt-6">
+            <SectionHeading
+              title="ML controls"
+              hint="Run jobs on demand without waiting for the scheduler."
+            />
+            <MLActionsPanel />
           </section>
 
           <section className="mt-6">
@@ -367,6 +381,28 @@ function SettingInput({
     isSecret && entry.has_value ? "Stored (hidden) — type to replace" : "";
   const current = (value as string | null) ?? "";
 
+  // Enumerated string → render as a typed select. Used by `forecast.default_engine`
+  // and any future spec with `allowed_values` set.
+  if (entry.type === "string" && entry.allowed_values) {
+    const selected =
+      typeof value === "string"
+        ? value
+        : (entry.value as string | null) ?? entry.allowed_values[0];
+    return (
+      <select
+        value={selected}
+        onChange={(e) => onChange(e.target.value)}
+        className="rounded-md border border-zinc-200 bg-white px-2 py-1 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+      >
+        {entry.allowed_values.map((v) => (
+          <option key={v} value={v}>
+            {v}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
   return (
     <div className="flex items-center gap-2">
       <input
@@ -416,6 +452,200 @@ function SourceBadge({
     >
       {source}
     </span>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// ML actions panel — surfaces synchronous jobs the scheduler would otherwise
+// run on its own cadence. "Retrain all" + "Score now" are non-destructive;
+// "Clear forecasts" is gated behind a confirm.
+// ----------------------------------------------------------------------------
+
+interface ActionState {
+  message: string | null;
+  tone: "info" | "success" | "error" | null;
+  busy: "retrain" | "score" | "clear" | null;
+}
+
+const INITIAL_ACTIONS: ActionState = { message: null, tone: null, busy: null };
+
+function MLActionsPanel() {
+  const [state, setState] = useState<ActionState>(INITIAL_ACTIONS);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const onRetrainAll = async () => {
+    setState({ message: "Retraining…", tone: "info", busy: "retrain" });
+    try {
+      const r = await retrainAllForecasts();
+      setState({
+        message:
+          `Retrained ${r.trained} of ${r.requested} eligible asset` +
+          `${r.requested === 1 ? "" : "s"} via ${r.engine}` +
+          (r.skipped > 0 ? ` · ${r.skipped} skipped (insufficient data or fit error)` : ""),
+        tone: "success",
+        busy: null,
+      });
+    } catch (err) {
+      setState({
+        message: err instanceof Error ? err.message : String(err),
+        tone: "error",
+        busy: null,
+      });
+    }
+  };
+
+  const onScoreNow = async () => {
+    setState({ message: "Scoring…", tone: "info", busy: "score" });
+    try {
+      const r = await scoreArticlesNow();
+      setState({
+        message:
+          r.scored === 0
+            ? "No unscored articles — every headline already has a sentiment score."
+            : `Scored ${r.scored} previously-unscored article${r.scored === 1 ? "" : "s"}.`,
+        tone: "success",
+        busy: null,
+      });
+    } catch (err) {
+      setState({
+        message: err instanceof Error ? err.message : String(err),
+        tone: "error",
+        busy: null,
+      });
+    }
+  };
+
+  const onClearForecasts = async () => {
+    setConfirmOpen(false);
+    setState({ message: "Clearing…", tone: "info", busy: "clear" });
+    try {
+      const r = await clearAllForecasts();
+      setState({
+        message:
+          r.deleted === 0
+            ? "No forecasts to clear."
+            : `Cleared ${r.deleted} stored forecast${r.deleted === 1 ? "" : "s"}.`,
+        tone: "success",
+        busy: null,
+      });
+    } catch (err) {
+      setState({
+        message: err instanceof Error ? err.message : String(err),
+        tone: "error",
+        busy: null,
+      });
+    }
+  };
+
+  return (
+    <div className="mt-3 space-y-3">
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              Retrain all forecasts
+            </div>
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+              Refits every active asset using the engine you selected above.
+              Takes ~1 second per asset; per-asset failures are reported but
+              don't block the rest of the batch.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onRetrainAll}
+            disabled={state.busy !== null}
+            className="inline-flex items-center gap-1.5 rounded-md border border-indigo-500/40 bg-indigo-500/10 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-500/15 disabled:opacity-50 dark:border-indigo-400/40 dark:text-indigo-300"
+          >
+            {state.busy === "retrain" ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="h-3.5 w-3.5" />
+            )}
+            {state.busy === "retrain" ? "Retraining…" : "Retrain all"}
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              Score unscored articles
+            </div>
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+              Runs VADER over every article that doesn't yet have a sentiment
+              score. Most useful right after enabling sentiment for the first
+              time on an existing news corpus.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onScoreNow}
+            disabled={state.busy !== null}
+            className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-500/15 disabled:opacity-50 dark:border-emerald-400/40 dark:text-emerald-300"
+          >
+            {state.busy === "score" ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="h-3.5 w-3.5" />
+            )}
+            {state.busy === "score" ? "Scoring…" : "Score now"}
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              Clear all forecasts
+            </div>
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+              Wipes the forecasts table — typical use is "switch engines and
+              start clean". Price history and articles are untouched.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setConfirmOpen(true)}
+            disabled={state.busy !== null}
+            className="inline-flex items-center gap-1.5 rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-500/15 disabled:opacity-50 dark:border-rose-400/40 dark:text-rose-300"
+          >
+            {state.busy === "clear" ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Trash2 className="h-3.5 w-3.5" />
+            )}
+            {state.busy === "clear" ? "Clearing…" : "Clear forecasts"}
+          </button>
+        </div>
+      </div>
+
+      {state.message && (
+        <p
+          className={`text-xs ${
+            state.tone === "success"
+              ? "text-emerald-600 dark:text-emerald-400"
+              : state.tone === "error"
+                ? "text-rose-600 dark:text-rose-400"
+                : "text-zinc-500 dark:text-zinc-400"
+          }`}
+        >
+          {state.message}
+        </p>
+      )}
+
+      <ConfirmDialog
+        open={confirmOpen}
+        title="Clear all forecasts?"
+        message="Every stored forecast will be removed. Price history and articles are untouched — re-running 'Retrain all' will rebuild forecasts from current daily-close history."
+        confirmLabel="Clear"
+        destructive
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={onClearForecasts}
+      />
+    </div>
   );
 }
 

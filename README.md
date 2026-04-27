@@ -11,6 +11,7 @@ A cross-platform desktop application for tracking market data, aggregating finan
 - **Macro** — FRED economic indicators (CPI, unemployment, Fed funds rate, 10Y treasury, GDP) rendered as line charts with latest/previous/vs-start stats.
 - **Price alerts** — set threshold alarms above or below a given price; when triggered, a native desktop notification fires and the alert lands in the in-app notification center.
 - **Market overview** — top gainers and losers across your tracked assets over the last 24 hours.
+- **Price forecasting (local ML)** — 14-day SARIMAX projection on the daily candle chart: dashed median line plus 80% and 95% confidence bands. Auto-retrains nightly on every eligible asset; "Retrain now" on the asset page kicks off an ad-hoc fit (~1 s). Nothing leaves your machine — the model runs entirely inside the sidecar against your own price history.
 - **Settings** — theme (system / light / dark), runtime scheduler intervals, FRED API key, and a read-only view of DB path + port + log level.
 
 All data lives in a SQLite database in your OS app-data directory. Nothing leaves your machine except outbound calls to the free public data sources.
@@ -51,7 +52,7 @@ Linux is not supported in Phase 1 — it's deferred to a future release.
 ## Status
 
 - **Phase 1 (desktop scaffold + market tracking):** ✅ complete. Dashboard, watchlists, news, macro, market overview, price alerts, settings — all shipping.
-- **Phase 2 (local ML — sentiment analysis + price forecasting):** not started.
+- **Phase 2 (local ML — price forecasting):** ✅ shipping as of v0.2.0. Daily-bar ingest, SARIMAX(1,1,1) engine, nightly retrain, on-chart overlay with CI bands. Sentiment analysis on news headlines is deferred to a later v0.2.x.
 
 Signed installers, auto-updates, and Linux support are all planned for post-Phase-1 releases.
 
@@ -67,6 +68,7 @@ Signed installers, auto-updates, and Linux support are all planned for post-Phas
 | ORM + migrations | SQLAlchemy 2.x + Alembic |
 | Scheduler | APScheduler (in-process, persistent jobstore) |
 | Data sources | yfinance, CoinGecko, FRED, Yahoo Finance RSS |
+| Forecasting | statsmodels SARIMAX (lazy-loaded, CPU-only) |
 | Packaging | PyInstaller (sidecar) + Tauri bundler (shell) |
 
 All data sources are free. Nothing is hosted. Scheduler jobs persist across app restarts in the same SQLite file.
@@ -92,7 +94,7 @@ Clone + set up:
 # Python sidecar
 python -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -r requirements.txt -r requirements-dev.txt
+pip install -r requirements.txt -r requirements-dev.txt -r requirements-ml.txt
 
 # Shell
 pnpm -C shell install
@@ -115,7 +117,7 @@ FINTRACK_EXTERNAL_SIDECAR=1 pnpm -C shell tauri dev
 Checks:
 
 ```bash
-pytest                               # sidecar tests (241 passing)
+pytest                               # sidecar + ML tests (304 passing)
 ruff check .                         # Python lint
 mypy --strict sidecar/               # Python types
 pnpm -C shell lint                   # TS + React lint
@@ -143,7 +145,10 @@ FinTrack/
 │   ├── scheduler/                   APScheduler jobs
 │   ├── ingestion/                   yfinance / CoinGecko / FRED / RSS fetchers
 │   └── services/                    Business logic (settings, watchlists, alerts, …)
-├── ml/                              Phase 2 — local ML training (not yet active)
+├── ml/                              Phase 2 — local SARIMAX forecasting
+│   ├── forecast.py                  Pure-compute: fit + CI bands
+│   ├── persistence.py               Upsert / load latest per asset
+│   └── jobs.py                      Nightly retrain + "retrain now" wrapper
 ├── tests/                           Pytest suites
 ├── docs/
 │   ├── development/                 Release runbook + setup notes
@@ -151,6 +156,7 @@ FinTrack/
 ├── sidecar.spec                     PyInstaller one-folder spec
 ├── requirements.txt                 Sidecar runtime deps
 ├── requirements-dev.txt             Test + lint deps
+├── requirements-ml.txt              Phase 2 — statsmodels (forecasting)
 ├── requirements-packaging.txt       PyInstaller (release machines only)
 └── .claude/                         Claude Code project memory
 ```

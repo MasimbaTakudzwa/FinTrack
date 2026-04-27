@@ -8,6 +8,7 @@ import {
   getPriceSeries,
   listAssets,
 } from "../api/client";
+import { CorrelationHeatmap } from "../components/CorrelationHeatmap";
 
 interface MoverRow {
   asset: Asset;
@@ -197,6 +198,10 @@ export function Market() {
             </div>
           ))}
         </dl>
+      </div>
+
+      <div className="mt-4">
+        <CorrelationHeatmap preferDefaultWatchlist />
       </div>
     </div>
   );

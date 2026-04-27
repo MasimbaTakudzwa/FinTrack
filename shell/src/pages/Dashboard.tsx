@@ -12,6 +12,7 @@ import {
 } from "../api/client";
 import { AddAssetModal } from "../components/AddAssetModal";
 import { AssetCard } from "../components/AssetCard";
+import { PortfolioSummaryStrip } from "../components/PortfolioSummaryStrip";
 
 interface LoadState {
   /** Ordered list of assets to render. Driven by the default watchlist when present. */
@@ -182,6 +183,8 @@ export function Dashboard() {
           </button>
         </div>
       )}
+
+      <PortfolioSummaryStrip />
 
       {state.assetsError && (
         <div className="mb-4 rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-300">
