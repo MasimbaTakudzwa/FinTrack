@@ -26,10 +26,12 @@ import {
   type PriceAlert,
   type PricePoint,
   type PriceSeries,
+  type Quote,
   type SentimentTimeseriesPoint,
   getForecast,
   getMacroSeries,
   getPriceSeries,
+  getQuote,
   getSentimentTimeseries,
   listAlerts,
   listAssets,
@@ -50,6 +52,7 @@ import { useResolvedTheme } from "../stores/useSettings";
 interface State {
   asset: Asset | null;
   series: PriceSeries | null;
+  quote: Quote | null;
   loading: boolean;
   error: string | null;
   notFound: boolean;
@@ -58,6 +61,7 @@ interface State {
 const INITIAL: State = {
   asset: null,
   series: null,
+  quote: null,
   loading: true,
   error: null,
   notFound: false,
@@ -94,14 +98,6 @@ function fmtPct(pct: number): string {
   return `${sign}${pct.toFixed(2)}%`;
 }
 
-function latestChange(points: PricePoint[]): number | null {
-  if (points.length < 2) return null;
-  const last = Number(points[points.length - 1].close);
-  const prev = Number(points[points.length - 2].close);
-  if (!prev) return null;
-  return ((last - prev) / prev) * 100;
-}
-
 /**
  * SQLite returns naive datetimes — coerce to UTC for a consistent parse.
  * Used to turn ``timestamp`` strings on PricePoint into unix-millis.
@@ -131,9 +127,12 @@ export function AssetDetail() {
     let cancelled = false;
     (async () => {
       try {
-        const [assets, series] = await Promise.all([
+        const [assets, series, quote] = await Promise.all([
           listAssets({ activeOnly: false, signal: controller.signal }),
           getPriceSeries(symbol, { limit: MAX_BARS, signal: controller.signal }),
+          // Day change comes from the server quote; tolerate its absence
+          // (e.g. no daily bars yet) so the page still renders.
+          getQuote(symbol, controller.signal).catch(() => null),
         ]);
         const asset = assets.find(
           (a) => a.symbol.toUpperCase() === symbol.toUpperCase(),
@@ -146,6 +145,7 @@ export function AssetDetail() {
         setState({
           asset,
           series,
+          quote,
           loading: false,
           error: null,
           notFound: false,
@@ -219,6 +219,7 @@ export function AssetDetail() {
           key={state.asset.symbol}
           asset={state.asset}
           series={state.series}
+          quote={state.quote}
           dark={resolved === "dark"}
         />
       )}
@@ -318,10 +319,12 @@ const FORECAST_INITIAL: ForecastState = {
 function AssetBody({
   asset,
   series,
+  quote,
   dark,
 }: {
   asset: Asset;
   series: PriceSeries;
+  quote: Quote | null;
   dark: boolean;
 }) {
   const [alertOpen, setAlertOpen] = useState(false);
@@ -466,8 +469,17 @@ function AssetBody({
   );
 
   const last = visiblePoints[visiblePoints.length - 1];
-  const lastClose = last ? Number(last.close) : null;
-  const changePct = latestChange(visiblePoints);
+  // Last price + day change come from the server quote (previous-session close
+  // vs. live price). Fall back to the latest visible bar's close for price only
+  // when no quote is available; the header "change" is a true *day* change, not
+  // the last-two-bar delta the timeframe toggle might imply.
+  const lastClose =
+    quote?.last_price != null
+      ? Number(quote.last_price)
+      : last
+        ? Number(last.close)
+        : null;
+  const changePct = quote?.change_pct ?? null;
   const dir: "up" | "down" | "flat" =
     changePct === null ? "flat" : changePct > 0 ? "up" : changePct < 0 ? "down" : "flat";
 

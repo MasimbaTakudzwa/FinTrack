@@ -1,17 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowDownRight, ArrowUpRight, RefreshCw } from "lucide-react";
-import {
-  type Asset,
-  type AssetType,
-  type PriceSeries,
-  getPriceSeries,
-  listAssets,
-} from "../api/client";
+import { type AssetType, listQuotes } from "../api/client";
 import { CorrelationHeatmap } from "../components/CorrelationHeatmap";
 
 interface MoverRow {
-  asset: Asset;
+  symbol: string;
+  name: string;
+  assetType: AssetType;
   lastClose: number | null;
   changePct: number | null;
 }
@@ -24,10 +20,7 @@ interface State {
 
 const INITIAL: State = { rows: [], loading: true, error: null };
 
-// 5-min bars × 288 ≈ 24 hours of intraday data. Enough to make the rolling 24h
-// change meaningful even when the latest two bars are flat (off-hours etc.).
-const CHANGE_WINDOW_BARS = 300;
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const KNOWN_TYPES: AssetType[] = ["stock", "etf", "crypto", "commodity", "index"];
 
 function fmtPrice(n: number): string {
   if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -40,60 +33,19 @@ function fmtPct(pct: number): string {
   return `${sign}${pct.toFixed(2)}%`;
 }
 
-/**
- * Compute "recent change %" for the movers board.
- *
- * Previously this was (last close − previous close) / previous close, but with
- * 5-min bars that window is so short that two adjacent closes are often
- * identical (weekends, pre/post-market) and every asset ends up excluded from
- * both gainers and losers.
- *
- * Now: find the oldest bar whose timestamp is within the last 24h; compute
- * change relative to that close. Falls back to the oldest bar in the window
- * when the data doesn't span 24h yet (fresh install).
- */
-function toRow(asset: Asset, series: PriceSeries): MoverRow {
-  const pts = series.points;
-  if (pts.length === 0) return { asset, lastClose: null, changePct: null };
-  const lastClose = Number(pts[pts.length - 1].close);
-  if (pts.length < 2) return { asset, lastClose, changePct: null };
-
-  const nowMs = Date.now();
-  const cutoffMs = nowMs - ONE_DAY_MS;
-  let anchorIdx = 0;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const tsIso = pts[i].timestamp;
-    // SQLite returns naive datetimes — coerce to UTC for a consistent parse.
-    const normalised = /[zZ]|[+-]\d{2}:?\d{2}$/.test(tsIso) ? tsIso : `${tsIso}Z`;
-    const t = Date.parse(normalised);
-    if (!Number.isNaN(t) && t >= cutoffMs) {
-      anchorIdx = i;
-      break;
-    }
-  }
-  const anchor = Number(pts[anchorIdx].close);
-  if (!anchor) return { asset, lastClose, changePct: null };
-  const changePct = ((lastClose - anchor) / anchor) * 100;
-  return { asset, lastClose, changePct };
-}
-
 async function loadRows(signal: AbortSignal): Promise<MoverRow[]> {
-  const assets = await listAssets({ signal });
-  const rows: MoverRow[] = [];
-  await Promise.all(
-    assets.map(async (a) => {
-      try {
-        const series = await getPriceSeries(a.symbol, {
-          limit: CHANGE_WINDOW_BARS,
-          signal,
-        });
-        rows.push(toRow(a, series));
-      } catch {
-        rows.push({ asset: a, lastClose: null, changePct: null });
-      }
-    }),
-  );
-  return rows;
+  // Day change comes from the server quote (previous-session close vs. live
+  // price), so gainers/losers reflect a real daily move — not a delta between
+  // two adjacent 5-minute bars (which are often identical off-hours, leaving
+  // the losers board permanently empty).
+  const { quotes } = await listQuotes({ activeOnly: true, signal });
+  return quotes.map((q) => ({
+    symbol: q.symbol,
+    name: q.name,
+    assetType: q.asset_type,
+    lastClose: q.last_price != null ? Number(q.last_price) : null,
+    changePct: q.change_pct,
+  }));
 }
 
 export function Market() {
@@ -136,14 +88,12 @@ export function Market() {
       .slice(-5)
       .reverse();
 
-    const byType: Record<AssetType, number> = {
-      stock: 0,
-      etf: 0,
-      crypto: 0,
-      commodity: 0,
-      index: 0,
-    };
-    for (const r of state.rows) byType[r.asset.asset_type] += 1;
+    // Seed the known buckets (so the grid is stable) but accumulate
+    // defensively — a new/unmapped asset_type from the backend must not turn a
+    // cell into NaN.
+    const byType: Record<string, number> = {};
+    for (const t of KNOWN_TYPES) byType[t] = 0;
+    for (const r of state.rows) byType[r.assetType] = (byType[r.assetType] ?? 0) + 1;
     return { gainers, losers, byType };
   }, [state.rows]);
 
@@ -187,7 +137,7 @@ export function Market() {
           By asset type
         </h3>
         <dl className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-5">
-          {(Object.keys(byType) as AssetType[]).map((t) => (
+          {Object.keys(byType).map((t) => (
             <div key={t} className="rounded-md bg-zinc-50 p-3 dark:bg-zinc-900">
               <dt className="text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
                 {t}
@@ -228,18 +178,18 @@ function MoverPanel({
         <p className="text-sm text-zinc-400 dark:text-zinc-500">No data yet.</p>
       ) : (
         <ul className="divide-y divide-zinc-100 dark:divide-zinc-800">
-          {rows.map(({ asset, lastClose, changePct }) => (
-            <li key={asset.id}>
+          {rows.map(({ symbol, name, lastClose, changePct }) => (
+            <li key={symbol}>
               <Link
-                to={`/assets/${encodeURIComponent(asset.symbol)}`}
+                to={`/assets/${encodeURIComponent(symbol)}`}
                 className="flex items-center justify-between py-2 hover:bg-zinc-50 dark:hover:bg-zinc-900"
               >
                 <div>
                   <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                    {asset.symbol}
+                    {symbol}
                   </div>
                   <div className="text-xs text-zinc-500 dark:text-zinc-400">
-                    {asset.name}
+                    {name}
                   </div>
                 </div>
                 <div className="flex items-center gap-3">

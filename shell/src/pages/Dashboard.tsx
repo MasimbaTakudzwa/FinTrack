@@ -5,10 +5,12 @@ import {
   ApiError,
   type Asset,
   type PriceSeries,
+  type Quote,
   type WatchlistDetail,
   getDefaultWatchlist,
   getPriceSeries,
   listAssets,
+  listQuotes,
 } from "../api/client";
 import { AddAssetModal } from "../components/AddAssetModal";
 import { AssetCard } from "../components/AssetCard";
@@ -21,6 +23,8 @@ interface LoadState {
   /** True when no default watchlist exists (vs. exists-but-empty). */
   noDefault: boolean;
   series: Record<string, PriceSeries>;
+  /** Server-computed day-change quotes, keyed by symbol. */
+  quotes: Record<string, Quote>;
   errors: Record<string, string>;
   assetsError: string | null;
   loading: boolean;
@@ -31,6 +35,7 @@ const INITIAL: LoadState = {
   watchlistName: null,
   noDefault: false,
   series: {},
+  quotes: {},
   errors: {},
   assetsError: null,
   loading: true,
@@ -70,8 +75,24 @@ async function loadAll(
 
   const series: Record<string, PriceSeries> = {};
   const errors: Record<string, string> = {};
-  await Promise.all(
-    assets.map(async (a) => {
+  const quotes: Record<string, Quote> = {};
+
+  // Day-change comes from the server quote (previous-session close vs. live
+  // price) — not from differencing two intraday bars. Sparklines still use the
+  // intraday series.
+  const quotesPromise = assets.length
+    ? listQuotes({ symbols: assets.map((a) => a.symbol), activeOnly: false, signal })
+        .then((res) => {
+          for (const q of res.quotes) quotes[q.symbol] = q;
+        })
+        .catch(() => {
+          /* non-fatal — cards fall back to last close with no change */
+        })
+    : Promise.resolve();
+
+  await Promise.all([
+    quotesPromise,
+    ...assets.map(async (a) => {
       try {
         series[a.symbol] = await getPriceSeries(a.symbol, {
           limit: 60,
@@ -81,12 +102,13 @@ async function loadAll(
         errors[a.symbol] = err instanceof Error ? err.message : String(err);
       }
     }),
-  );
+  ]);
   return {
     assets,
     watchlistName: detail?.name ?? null,
     noDefault,
     series,
+    quotes,
     errors,
     assetsError: null,
   };
@@ -219,6 +241,7 @@ export function Dashboard() {
             key={a.id}
             asset={a}
             series={state.series[a.symbol] ?? null}
+            quote={state.quotes[a.symbol] ?? null}
             loading={state.loading}
             error={state.errors[a.symbol] ?? null}
           />

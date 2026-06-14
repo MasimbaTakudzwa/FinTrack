@@ -1,11 +1,13 @@
 import { Link } from "react-router-dom";
 import { ArrowDownRight, ArrowUpRight, Minus } from "lucide-react";
-import type { Asset, PriceSeries } from "../api/client";
+import type { Asset, PriceSeries, Quote } from "../api/client";
 import { Sparkline } from "./Sparkline";
 
 interface Props {
   asset: Asset;
   series: PriceSeries | null;
+  /** Server-computed day-change quote (canonical). Null falls back to last close. */
+  quote?: Quote | null;
   loading?: boolean;
   error?: string | null;
 }
@@ -21,13 +23,15 @@ function fmtPct(pct: number): string {
   return `${sign}${pct.toFixed(2)}%`;
 }
 
-export function AssetCard({ asset, series, loading, error }: Props) {
+export function AssetCard({ asset, series, quote, loading, error }: Props) {
   const closes = series?.points.map((p) => Number(p.close)) ?? [];
-  const last = closes.at(-1) ?? null;
-  const prev = closes.length >= 2 ? closes.at(-2) ?? null : null;
-  const changePct = last !== null && prev !== null && prev !== 0
-    ? ((last - prev) / prev) * 100
-    : null;
+  // Last price prefers the server quote (which also drives the day change);
+  // fall back to the latest sparkline close when the quote is unavailable.
+  const quoteLast = quote?.last_price != null ? Number(quote.last_price) : null;
+  const last = quoteLast ?? closes.at(-1) ?? null;
+  // Day change is the server-computed previous-session figure, NOT a delta
+  // between the last two 5-minute bars.
+  const changePct = quote?.change_pct ?? null;
 
   const direction: "up" | "down" | "flat" =
     changePct === null ? "flat" : changePct > 0 ? "up" : changePct < 0 ? "down" : "flat";

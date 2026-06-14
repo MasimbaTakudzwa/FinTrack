@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 let baseUrlPromise: Promise<string> | null = null;
+let tokenPromise: Promise<string> | null = null;
 
 export async function getBaseUrl(): Promise<string> {
   if (!baseUrlPromise) {
@@ -13,6 +14,48 @@ export async function getBaseUrl(): Promise<string> {
     })();
   }
   return baseUrlPromise;
+}
+
+/**
+ * Per-launch bearer token the sidecar requires on every non-health request.
+ * Cached for the session. Empty string when running against an external dev
+ * sidecar (the command returns ""), in which case no header is sent and the
+ * sidecar's enforcement is off too.
+ */
+async function getToken(): Promise<string> {
+  if (!tokenPromise) {
+    tokenPromise = invoke<string>("get_sidecar_token").catch(() => "");
+  }
+  return tokenPromise;
+}
+
+async function authHeaders(
+  extra?: Record<string, string>,
+): Promise<Record<string, string>> {
+  const token = await getToken();
+  const headers: Record<string, string> = { ...extra };
+  if (token) headers["X-FinTrack-Token"] = token;
+  return headers;
+}
+
+/**
+ * Parse a backend timestamp as UTC milliseconds.
+ *
+ * SQLite stores DateTime columns without an offset, so the API emits strings
+ * like `"2026-06-14T13:35:00"` (no `Z`). Parsing those with `Date.parse`
+ * treats them as *browser-local* time, shifting every value by the user's UTC
+ * offset. This appends `Z` unless the string already carries a zone. Use this
+ * everywhere a backend timestamp is turned into a number — never call
+ * `Date.parse` on a raw backend timestamp directly.
+ */
+const _TZ_RE = /[zZ]$|[+-]\d{2}:?\d{2}$/;
+export function parseUtcMs(iso: string): number {
+  return Date.parse(_TZ_RE.test(iso) ? iso : `${iso}Z`);
+}
+
+/** UTC seconds (lightweight-charts `UTCTimestamp`) from a backend timestamp. */
+export function barTimeSeconds(iso: string): number {
+  return parseUtcMs(iso) / 1000;
 }
 
 export class ApiError extends Error {
@@ -45,7 +88,10 @@ async function apiGet<T>(
 ): Promise<T> {
   const base = await getBaseUrl();
   const url = `${base}${path}${buildQuery(opts.params)}`;
-  const res = await fetch(url, { signal: opts.signal });
+  const res = await fetch(url, {
+    signal: opts.signal,
+    headers: await authHeaders(),
+  });
   if (!res.ok) {
     throw new ApiError(res.status, url, `GET ${path} → HTTP ${res.status}`);
   }
@@ -81,9 +127,13 @@ async function apiJson<T, B>(
   const init: RequestInit = {
     method,
     signal: opts.signal,
+    // Auth token on every method. DELETE-via-apiJson (e.g. clearAllForecasts)
+    // must still carry the token even though it sends no Content-Type/body.
+    headers: await authHeaders(
+      method !== "DELETE" ? { "Content-Type": "application/json" } : undefined,
+    ),
   };
   if (method !== "DELETE") {
-    init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);
   }
   const res = await fetch(url, init);
@@ -104,6 +154,7 @@ async function apiDelete(
   const res = await fetch(url, {
     method: "DELETE",
     signal: opts.signal,
+    headers: await authHeaders(),
   });
   if (!res.ok) {
     throw new ApiError(res.status, url, `DELETE ${path} → ${await _detail(res, "DELETE", path)}`);
@@ -274,6 +325,47 @@ export function getPriceSeries(
     },
     signal: opts.signal,
   });
+}
+
+// ---------- Quotes ----------
+
+/**
+ * Server-computed quote — the single source of truth for "day change %".
+ * `change_pct` is a true day change (last price vs. *previous session* close
+ * from daily `interval="1d"` bars), not a last-two-intraday-bars delta.
+ * Decimal fields are strings; `change_pct` is a number (or null when there's
+ * no previous close yet).
+ */
+export interface Quote {
+  symbol: string;
+  name: string;
+  asset_type: AssetType;
+  last_price: string | null;
+  last_at: string | null; // ISO 8601 — treat as UTC
+  previous_close: string | null;
+  change: string | null;
+  change_pct: number | null;
+}
+
+export interface QuoteList {
+  count: number;
+  quotes: Quote[];
+}
+
+export function listQuotes(
+  opts: { symbols?: string[]; activeOnly?: boolean; signal?: AbortSignal } = {},
+): Promise<QuoteList> {
+  return apiGet<QuoteList>("/api/quotes/", {
+    params: {
+      symbols: opts.symbols?.length ? opts.symbols.join(",") : undefined,
+      active_only: opts.activeOnly ?? true,
+    },
+    signal: opts.signal,
+  });
+}
+
+export function getQuote(symbol: string, signal?: AbortSignal): Promise<Quote> {
+  return apiGet<Quote>(`/api/quotes/${encodeURIComponent(symbol)}/`, { signal });
 }
 
 // ---------- Macro ----------
@@ -877,7 +969,7 @@ export async function exportPortfolioTransactionsCsv(
 ): Promise<{ blob: Blob; filename: string }> {
   const base = await getBaseUrl();
   const url = `${base}/api/portfolio/transactions/export.csv`;
-  const res = await fetch(url, { signal });
+  const res = await fetch(url, { signal, headers: await authHeaders() });
   if (!res.ok) {
     throw new ApiError(res.status, url, `GET ${url} → HTTP ${res.status}`);
   }

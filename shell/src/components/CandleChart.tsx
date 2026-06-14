@@ -17,6 +17,7 @@ import {
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
+import { barTimeSeconds } from "../api/client";
 import type {
   Forecast,
   PricePoint,
@@ -82,7 +83,10 @@ const SENTIMENT_MARKER_MIN_COUNT = 2;
 
 function toCandles(points: PricePoint[]): CandlestickData<UTCTimestamp>[] {
   return points.map((p) => ({
-    time: (Date.parse(p.timestamp) / 1000) as UTCTimestamp,
+    // barTimeSeconds appends `Z` to the offset-less backend timestamp so the
+    // axis is UTC, not browser-local (which shifted every candle by the user's
+    // offset and broke the measurement tool's time basis).
+    time: barTimeSeconds(p.timestamp) as UTCTimestamp,
     open: Number(p.open),
     high: Number(p.high),
     low: Number(p.low),
@@ -94,7 +98,7 @@ function toVolume(points: PricePoint[]): HistogramData<UTCTimestamp>[] {
   return points.map((p) => {
     const up = Number(p.close) >= Number(p.open);
     return {
-      time: (Date.parse(p.timestamp) / 1000) as UTCTimestamp,
+      time: barTimeSeconds(p.timestamp) as UTCTimestamp,
       value: p.volume,
       color: up ? "rgba(16, 185, 129, 0.4)" : "rgba(244, 63, 94, 0.4)",
     };
