@@ -1,7 +1,7 @@
 use std::env;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,12 @@ use tauri::{AppHandle, Manager, RunEvent, State, WindowEvent};
 
 struct SidecarState {
     port: u16,
+    /// Per-launch bearer token required by the sidecar on every non-health
+    /// request. Localhost is reachable by every process on the machine (and,
+    /// via DNS-rebinding, by malicious web pages), so the random port is not a
+    /// security boundary — this token is. Empty when using an external dev
+    /// sidecar we didn't spawn (enforcement is then off on both ends).
+    token: String,
     child: Mutex<Option<Child>>,
 }
 
@@ -73,7 +79,30 @@ fn find_frozen_sidecar(app: &AppHandle) -> Option<PathBuf> {
     }
 }
 
-fn spawn_sidecar(app: &AppHandle, port: u16) -> std::io::Result<Child> {
+/// Stdio handles that send the sidecar's stdout+stderr to a log file in the
+/// app log dir. In a bundled `.app` launched from Finder there is no attached
+/// terminal, so inherited stdio would discard every migration/uvicorn error.
+/// Falls back to inherited stdio if the log dir/file can't be opened.
+fn sidecar_log_stdio(app: &AppHandle) -> (Stdio, Stdio) {
+    if let Ok(dir) = app.path().app_log_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sidecar.log");
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            if let Ok(clone) = file.try_clone() {
+                eprintln!("[sidecar] logging to {}", path.display());
+                return (Stdio::from(file), Stdio::from(clone));
+            }
+        }
+    }
+    (Stdio::inherit(), Stdio::inherit())
+}
+
+fn spawn_sidecar(app: &AppHandle, port: u16, token: &str) -> std::io::Result<Child> {
+    let (out, err) = sidecar_log_stdio(app);
     if let Some(frozen) = find_frozen_sidecar(app) {
         eprintln!("[sidecar] spawning frozen binary: {}", frozen.display());
         // No `current_dir` — let the frozen sidecar fall through to
@@ -83,6 +112,9 @@ fn spawn_sidecar(app: &AppHandle, port: u16) -> std::io::Result<Child> {
         // whatever the OS gives us (likely `/` on macOS launchd) is correct.
         Command::new(&frozen)
             .env("FINTRACK_PORT", port.to_string())
+            .env("FINTRACK_AUTH_TOKEN", token)
+            .stdout(out)
+            .stderr(err)
             .spawn()
     } else {
         let root = repo_root();
@@ -94,8 +126,45 @@ fn spawn_sidecar(app: &AppHandle, port: u16) -> std::io::Result<Child> {
             .args(["-m", "sidecar.main"])
             .current_dir(&root)
             .env("FINTRACK_PORT", port.to_string())
+            .env("FINTRACK_AUTH_TOKEN", token)
+            .stdout(out)
+            .stderr(err)
             .spawn()
     }
+}
+
+/// Spawn the sidecar, retrying with a fresh port if the chosen one fails to
+/// come up healthy. Closes the TOCTOU window where another process grabs the
+/// port between `pick_free_port`'s `drop(listener)` and the child re-binding.
+fn start_sidecar(app: &AppHandle, token: &str) -> (u16, Option<Child>) {
+    const ATTEMPTS: u32 = 3;
+    for attempt in 1..=ATTEMPTS {
+        let port = match pick_free_port() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[sidecar] failed to pick free port: {e}");
+                continue;
+            }
+        };
+        match spawn_sidecar(app, port, token) {
+            Ok(child) => {
+                eprintln!("[sidecar] spawned pid {} on port {}", child.id(), port);
+                if wait_for_health(port, Duration::from_secs(10)) {
+                    eprintln!("[sidecar] healthy on port {port}");
+                    return (port, Some(child));
+                }
+                eprintln!(
+                    "[sidecar] health check timed out on port {port} (attempt {attempt}/{ATTEMPTS})"
+                );
+                let mut child = child;
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            Err(e) => eprintln!("[sidecar] failed to spawn (attempt {attempt}/{ATTEMPTS}): {e}"),
+        }
+    }
+    eprintln!("[sidecar] gave up after {ATTEMPTS} attempts");
+    (0u16, None)
 }
 
 fn wait_for_health(port: u16, timeout: Duration) -> bool {
@@ -120,6 +189,11 @@ fn get_sidecar_port(state: State<'_, SidecarState>) -> u16 {
     state.port
 }
 
+#[tauri::command]
+fn get_sidecar_token(state: State<'_, SidecarState>) -> String {
+    state.token.clone()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -128,36 +202,25 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let external = env::var("FINTRACK_EXTERNAL_SIDECAR").unwrap_or_default() == "1";
-            let (port, child) = if external {
+            // An external dev sidecar we didn't spawn won't know our token, so
+            // leave it empty (sidecar enforcement is off when the env var is
+            // unset). Otherwise mint a fresh unguessable token per launch.
+            let (port, token, child) = if external {
                 eprintln!("[sidecar] using external sidecar on port 8765");
-                (8765u16, None)
+                (
+                    8765u16,
+                    env::var("FINTRACK_AUTH_TOKEN").unwrap_or_default(),
+                    None,
+                )
             } else {
-                match pick_free_port() {
-                    Ok(p) => match spawn_sidecar(&app.handle(), p) {
-                        Ok(c) => {
-                            eprintln!("[sidecar] spawned pid {} on port {}", c.id(), p);
-                            (p, Some(c))
-                        }
-                        Err(e) => {
-                            eprintln!("[sidecar] failed to spawn: {e}");
-                            (0u16, None)
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("[sidecar] failed to pick free port: {e}");
-                        (0u16, None)
-                    }
-                }
+                let token = uuid::Uuid::new_v4().simple().to_string();
+                let (port, child) = start_sidecar(&app.handle(), &token);
+                (port, token, child)
             };
-
-            if port != 0 && wait_for_health(port, Duration::from_secs(10)) {
-                eprintln!("[sidecar] healthy on port {port}");
-            } else if port != 0 {
-                eprintln!("[sidecar] health check timed out on port {port}");
-            }
 
             app.manage(SidecarState {
                 port,
+                token,
                 child: Mutex::new(child),
             });
 
@@ -176,7 +239,7 @@ pub fn run() {
                 window.app_handle().exit(0);
             }
         })
-        .invoke_handler(tauri::generate_handler![get_sidecar_port])
+        .invoke_handler(tauri::generate_handler![get_sidecar_port, get_sidecar_token])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

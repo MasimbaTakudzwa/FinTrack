@@ -80,6 +80,10 @@ for pkg in (
     "pandas",
     "patsy",
     "vaderSentiment",
+    # certifi ships the CA bundle (cacert.pem) — WITHOUT it every HTTPS call to
+    # FRED / CoinGecko / Yahoo fails SSL verification *only in the frozen build*,
+    # which the venv-run unit tests never catch.
+    "certifi",
 ):
     try:
         datas.extend(collect_data_files(pkg))
@@ -111,6 +115,9 @@ hiddenimports += collect_submodules("pydantic_settings")
 hiddenimports += collect_submodules("fastapi")
 hiddenimports += collect_submodules("starlette")
 hiddenimports += collect_submodules("anyio")
+# requests' TLS stack: requests is statically traceable, but charset_normalizer
+# loads its detection submodules dynamically and is easy to miss.
+hiddenimports += collect_submodules("charset_normalizer")
 
 # ML stack — statsmodels is lazily imported inside ``ml.forecast``, and its
 # SARIMAX implementation string-loads ``statsmodels.tsa.statespace.*`` and

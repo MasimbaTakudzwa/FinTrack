@@ -141,7 +141,7 @@ Target platforms for Phase 1: macOS and Windows. Linux deferred to post-Phase-1.
 
 ### SQLite + SQLAlchemy
 
-- **Engine:** SQLAlchemy 2.x (async for API endpoints, sync for scheduler jobs — separate session factories)
+- **Engine:** SQLAlchemy 2.x, **synchronous** throughout. The API endpoints are sync (`def`, not `async def`) and FastAPI runs them in its anyio threadpool; scheduler jobs run in APScheduler's `ThreadPoolExecutor`. Both share **one** module-level engine + sessionmaker (`sidecar/db/engine.py`, lazily built under a lock) — not separate factories. WAL + `busy_timeout=5000` make the concurrent threadpool-reader / scheduler-writer access safe; the APScheduler `SQLAlchemyJobStore` reuses this same engine so it inherits the pragmas. There is no async DB path; an earlier draft of this doc described one that was never built.
 - **File path (resolved via `platformdirs`):**
   - Dev: `./fintrack.db` in repo root (gitignored)
   - Prod Mac: `~/Library/Application Support/FinTrack/fintrack.db`

@@ -92,16 +92,50 @@ jobs:
           # full ML stack, otherwise the forecast feature is silently broken.
           pip install -r requirements.txt -r requirements-ml.txt -r requirements-packaging.txt
 
+      - name: Check version sync
+        shell: bash
+        run: |
+          tv=$(grep -m1 '"version"' shell/src-tauri/tauri.conf.json | sed -E 's/.*"version" *: *"([^"]+)".*/\1/')
+          cv=$(grep -m1 '^version' shell/src-tauri/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          pv=$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "tauri.conf.json=$tv  Cargo.toml=$cv  pyproject.toml=$pv"
+          if [ "$tv" != "$cv" ] || [ "$tv" != "$pv" ]; then
+            echo "::error::version mismatch across tauri.conf.json / Cargo.toml / pyproject.toml"
+            exit 1
+          fi
+
       - name: Freeze sidecar with PyInstaller
         run: pyinstaller sidecar.spec --clean --noconfirm
 
-      - name: Verify frozen binary exists (macOS)
+      - name: Smoke-test frozen sidecar (macOS)
         if: runner.os == 'macOS'
         run: |
           test -x dist/fintrack-sidecar/fintrack-sidecar
           ls -lah dist/fintrack-sidecar/
+          PYTHONUNBUFFERED=1 \
+          FINTRACK_PORT=8799 \
+          FINTRACK_ENABLE_SCHEDULER=false \
+          FINTRACK_DISABLE_PARENT_WATCHDOG=1 \
+            ./dist/fintrack-sidecar/fintrack-sidecar &
+          PID=$!
+          ok=0
+          # ML stack (statsmodels/scipy) makes first import heavy — allow 90s.
+          for i in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:8799/api/health/" >/dev/null 2>&1; then
+              echo "frozen sidecar healthy after ${i}s"
+              curl -fsS "http://127.0.0.1:8799/api/health/"; echo
+              curl -fsS "http://127.0.0.1:8799/api/assets/" >/dev/null
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          kill $PID 2>/dev/null || true
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::frozen sidecar never became healthy"; exit 1
+          fi
 
-      - name: Verify frozen binary exists (Windows)
+      - name: Smoke-test frozen sidecar (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -109,6 +143,23 @@ jobs:
             throw "fintrack-sidecar.exe missing from PyInstaller output"
           }
           Get-ChildItem dist/fintrack-sidecar/
+          $env:PYTHONUNBUFFERED = "1"
+          $env:FINTRACK_PORT = "8799"
+          $env:FINTRACK_ENABLE_SCHEDULER = "false"
+          $env:FINTRACK_DISABLE_PARENT_WATCHDOG = "1"
+          $p = Start-Process -FilePath "dist/fintrack-sidecar/fintrack-sidecar.exe" -PassThru
+          $ok = $false
+          foreach ($i in 1..90) {
+            try {
+              Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8799/api/health/" | Out-Null
+              Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8799/api/assets/" | Out-Null
+              Write-Host "frozen sidecar healthy after ${i}s"
+              $ok = $true
+              break
+            } catch { Start-Sleep -Seconds 1 }
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "frozen sidecar never became healthy" }
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
