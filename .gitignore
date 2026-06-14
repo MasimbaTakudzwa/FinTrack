@@ -48,3 +48,5 @@ Thumbs.db
 # ───── Misc build artefacts ─────
 *.pid
 .tmp/
+
+.claude/worktrees/

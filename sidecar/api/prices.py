@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated
 
@@ -12,6 +12,21 @@ from sidecar.db.engine import session_scope
 from sidecar.db.models import Asset, PricePoint
 
 router = APIRouter(prefix="/api/prices", tags=["prices"])
+
+
+def _to_naive_utc(value: datetime | None) -> datetime | None:
+    """Coerce an incoming query datetime to naive-UTC.
+
+    SQLite stores ``DateTime`` columns as naive strings (no offset). An aware
+    bound like ``2026-01-01T00:00:00+00:00`` would compare *lexically* against
+    the stored ``2026-01-01 00:00:00`` and silently include/exclude boundary
+    rows. Normalising both sides to naive-UTC makes range filters correct.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return value
 
 
 class PricePointOut(BaseModel):
@@ -52,14 +67,16 @@ def get_prices(
         if asset is None:
             raise HTTPException(status_code=404, detail=f"Unknown symbol: {symbol}")
 
+        start_n = _to_naive_utc(start)
+        end_n = _to_naive_utc(end)
         stmt = select(PricePoint).where(
             PricePoint.asset_id == asset.id,
             PricePoint.interval == interval,
         )
-        if start is not None:
-            stmt = stmt.where(PricePoint.timestamp >= start)
-        if end is not None:
-            stmt = stmt.where(PricePoint.timestamp <= end)
+        if start_n is not None:
+            stmt = stmt.where(PricePoint.timestamp >= start_n)
+        if end_n is not None:
+            stmt = stmt.where(PricePoint.timestamp <= end_n)
         stmt = stmt.order_by(PricePoint.timestamp.desc()).limit(limit)
 
         rows = list(s.execute(stmt).scalars().all())

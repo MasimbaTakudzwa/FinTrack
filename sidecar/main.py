@@ -8,8 +8,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import RequestResponseEndpoint
+from starlette.responses import Response
 
 from sidecar import __version__, scheduler
 from sidecar.api.alerts import router as alerts_router
@@ -22,6 +25,7 @@ from sidecar.api.macro import router as macro_router
 from sidecar.api.news import router as news_router
 from sidecar.api.portfolio import router as portfolio_router
 from sidecar.api.prices import router as prices_router
+from sidecar.api.quotes import router as quotes_router
 from sidecar.api.watchlists import router as watchlists_router
 from sidecar.config import settings
 from sidecar.db.migrations_runner import upgrade_to_head
@@ -79,7 +83,44 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             scheduler.shutdown(wait=False)
 
 
+AUTH_HEADER = "x-fintrack-token"
+ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost"})
+
+
 app = FastAPI(title="FinTrack Sidecar", version=__version__, lifespan=lifespan)
+
+
+@app.middleware("http")
+async def auth_and_host_guard(
+    request: Request, call_next: RequestResponseEndpoint
+) -> Response:
+    """Enforce the per-launch token + a Host allowlist when a token is set.
+
+    Localhost is reachable by every local process and, via DNS rebinding, by
+    malicious web pages — CORS only governs browser *reads*, not whether a
+    state-changing request executes server-side. So:
+
+    * Host allowlist (127.0.0.1 / localhost) defeats DNS rebinding.
+    * A per-launch bearer token (``X-FinTrack-Token``) gates everything except
+      the health probe and CORS preflight, so other local processes can't
+      drive the API.
+
+    Both are skipped entirely when ``auth_token`` is empty (tests / standalone
+    runs), so the default developer experience is unchanged.
+    """
+    token = settings.auth_token
+    if token:
+        host = request.headers.get("host", "")
+        hostname = host.rsplit(":", 1)[0] if host else ""
+        if hostname not in ALLOWED_HOSTS:
+            return JSONResponse(status_code=403, content={"detail": "forbidden host"})
+        path = request.url.path
+        exempt = request.method == "OPTIONS" or path.startswith("/api/health")
+        if not exempt and request.headers.get(AUTH_HEADER, "") != token:
+            return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -90,6 +131,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(assets_router)
 app.include_router(prices_router)
+app.include_router(quotes_router)
 app.include_router(macro_router)
 app.include_router(news_router)
 app.include_router(watchlists_router)

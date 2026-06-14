@@ -14,6 +14,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from sidecar.config import settings
+from sidecar.db.engine import get_engine
 from sidecar.scheduler.jobs import (
     check_price_alerts,
     ingest_crypto,
@@ -32,8 +33,13 @@ _scheduler: BackgroundScheduler | None = None
 _lock = Lock()
 
 
-def _build_scheduler(db_path: str) -> BackgroundScheduler:
-    jobstores = {"default": SQLAlchemyJobStore(url=f"sqlite:///{db_path}")}
+def _build_scheduler() -> BackgroundScheduler:
+    # Reuse the app's configured engine so the jobstore connection inherits the
+    # WAL / busy_timeout=5000 / foreign_keys pragmas. A bare
+    # ``SQLAlchemyJobStore(url=...)`` would open a *second* engine with
+    # busy_timeout=0, so an APScheduler job-state write could hit SQLITE_BUSY
+    # immediately instead of waiting while an ingest job holds the write lock.
+    jobstores = {"default": SQLAlchemyJobStore(engine=get_engine())}
     executors = {"default": ThreadPoolExecutor(max_workers=4)}
     job_defaults = {
         "misfire_grace_time": 60,
@@ -48,6 +54,22 @@ def _build_scheduler(db_path: str) -> BackgroundScheduler:
     )
 
 
+def _first_add_kwargs(
+    scheduler: BackgroundScheduler, job_id: str, now: datetime
+) -> dict[str, Any]:
+    """``{next_run_time: now}`` only when the job is being added for the first time.
+
+    Fire-on-first-add gives a freshly-launched sidecar immediate data instead
+    of waiting a full interval. But on a *reconfigure* (any settings save) the
+    job already exists in the jobstore, so we must NOT pass ``next_run_time`` —
+    otherwise changing one unrelated setting would re-fire *every* ingest job
+    at once, hammering Yahoo/CoinGecko/RSS and tripping rate limits.
+    """
+    if scheduler.get_job(job_id) is None:
+        return {"next_run_time": now}
+    return {}
+
+
 def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> None:
     """Add / update / remove jobs to match `config`.
 
@@ -55,10 +77,10 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
     are removed via `remove_job` (wrapped in suppress to tolerate a not-yet-
     seeded jobstore on first start).
 
-    Interval-triggered jobs are scheduled with ``next_run_time=now`` so a
-    freshly-launched sidecar populates data immediately instead of waiting a
-    full interval (otherwise the dashboard shows empty price history for the
-    first 5-15 minutes after cold start).
+    Interval-triggered jobs fire immediately (``next_run_time=now``) only the
+    first time they are added (see ``_first_add_kwargs``) so a freshly-launched
+    sidecar populates data without waiting a full interval, while later
+    reconfigures don't trigger spurious refetch bursts.
     """
     now = datetime.now(UTC)
 
@@ -68,7 +90,7 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
         id="ingest_prices",
         name="Ingest OHLCV prices from yfinance",
         replace_existing=True,
-        next_run_time=now,
+        **_first_add_kwargs(scheduler, "ingest_prices", now),
     )
 
     if bool(config["ingest_crypto.enabled"]):
@@ -80,7 +102,7 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
             id="ingest_crypto",
             name="Ingest OHLC crypto prices from CoinGecko",
             replace_existing=True,
-            next_run_time=now,
+            **_first_add_kwargs(scheduler, "ingest_crypto", now),
         )
     else:
         with contextlib.suppress(JobLookupError):
@@ -95,23 +117,16 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
             id="ingest_news",
             name="Ingest news articles from Yahoo RSS",
             replace_existing=True,
-            next_run_time=now,
+            **_first_add_kwargs(scheduler, "ingest_news", now),
         )
     else:
         with contextlib.suppress(JobLookupError):
             scheduler.remove_job("ingest_news")
 
     if config.get("fred_api_key"):
-        # Fire-on-first-add semantics: when `ingest_macro` is being added for
-        # the first time (no prior job in the jobstore), kick off a backfill
-        # immediately so a user who just pasted their FRED key sees data
-        # without waiting up to 24h for the cron. On subsequent registrations
-        # — sidecar restart with the job already persisted, or a reconfigure
-        # that only changes the cron hour — we skip `next_run_time` so the
-        # existing schedule is honoured.
-        macro_kwargs: dict[str, Any] = {}
-        if scheduler.get_job("ingest_macro") is None:
-            macro_kwargs["next_run_time"] = now
+        # Fire-on-first-add: a user who just pasted their FRED key sees a
+        # backfill within seconds rather than waiting up to 24h for the cron,
+        # while a cron-hour reconfigure honours the existing schedule.
         scheduler.add_job(
             ingest_macro,
             trigger=CronTrigger(
@@ -120,19 +135,16 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
             id="ingest_macro",
             name="Ingest macro observations from FRED",
             replace_existing=True,
-            **macro_kwargs,
+            **_first_add_kwargs(scheduler, "ingest_macro", now),
         )
     else:
         with contextlib.suppress(JobLookupError):
             scheduler.remove_job("ingest_macro")
 
     if bool(config["ingest_prices_daily.enabled"]):
-        # Same fire-on-first-add pattern as ingest_macro — on a fresh install
-        # the user needs their 5y backfill to land in seconds, not on the next
-        # day's cron. On reconfigure / restart we respect the existing schedule.
-        daily_kwargs: dict[str, Any] = {}
-        if scheduler.get_job("ingest_prices_daily") is None:
-            daily_kwargs["next_run_time"] = now
+        # On a fresh install the user needs their 5y backfill to land in
+        # seconds, not on the next day's cron; on reconfigure / restart we
+        # respect the existing schedule.
         scheduler.add_job(
             ingest_prices_daily,
             trigger=CronTrigger(
@@ -141,7 +153,7 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
             id="ingest_prices_daily",
             name="Ingest daily closes (5y backfill + incremental)",
             replace_existing=True,
-            **daily_kwargs,
+            **_first_add_kwargs(scheduler, "ingest_prices_daily", now),
         )
     else:
         with contextlib.suppress(JobLookupError):
@@ -156,7 +168,7 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
             id="check_price_alerts",
             name="Scan active price alerts for threshold crossings",
             replace_existing=True,
-            next_run_time=now,
+            **_first_add_kwargs(scheduler, "check_price_alerts", now),
         )
     else:
         with contextlib.suppress(JobLookupError):
@@ -191,9 +203,6 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
         # very-occasional "ingest_news scored 0 because the ML backend
         # blipped" case. Fire-on-first-add so a fresh install with imported
         # articles populates immediately.
-        sentiment_kwargs: dict[str, Any] = {}
-        if scheduler.get_job("score_news_sentiment") is None:
-            sentiment_kwargs["next_run_time"] = now
         scheduler.add_job(
             score_news_sentiment_job,
             trigger=IntervalTrigger(
@@ -202,7 +211,7 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
             id="score_news_sentiment",
             name="VADER sentiment backfill for unscored articles",
             replace_existing=True,
-            **sentiment_kwargs,
+            **_first_add_kwargs(scheduler, "score_news_sentiment", now),
         )
     else:
         with contextlib.suppress(JobLookupError):
@@ -218,7 +227,7 @@ def start() -> BackgroundScheduler | None:
             logger.info("Scheduler disabled via settings")
             return None
         db_path = settings.resolved_db_path()
-        scheduler = _build_scheduler(db_path)
+        scheduler = _build_scheduler()
         _register_jobs(scheduler, load_effective_config())
         scheduler.start()
         logger.info("Scheduler started (jobstore=%s)", db_path)

@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     port: int = 8765
     db_path: str = ""
     log_level: str = "info"
+    # Per-launch bearer token injected by the Tauri shell. When set, the API
+    # requires it on every non-health request (see sidecar.main). Empty in
+    # tests / when running the sidecar standalone → enforcement is off.
+    auth_token: str = ""
     fred_api_key: str | None = None
     enable_scheduler: bool = True
     enable_seed: bool = True

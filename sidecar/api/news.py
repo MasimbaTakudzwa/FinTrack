@@ -13,6 +13,15 @@ from sidecar.db.models import Article, ArticleAsset, Asset
 router = APIRouter(prefix="/api/news", tags=["news"])
 
 
+def _to_naive_utc(value: datetime | None) -> datetime | None:
+    """Coerce a query datetime to naive-UTC to match SQLite's offset-less storage."""
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return value
+
+
 SentimentBucket = Literal["positive", "neutral", "negative"]
 
 # VADER's conventional thresholds — kept in sync with ``ml.sentiment``.
@@ -125,10 +134,12 @@ def list_news(
                 ArticleAsset, ArticleAsset.article_id == Article.id
             ).where(ArticleAsset.asset_id == asset.id)
 
-        if start is not None:
-            stmt = stmt.where(Article.published_at >= start)
-        if end is not None:
-            stmt = stmt.where(Article.published_at <= end)
+        start_n = _to_naive_utc(start)
+        end_n = _to_naive_utc(end)
+        if start_n is not None:
+            stmt = stmt.where(Article.published_at >= start_n)
+        if end_n is not None:
+            stmt = stmt.where(Article.published_at <= end_n)
 
         if sentiment == "positive":
             stmt = stmt.where(Article.sentiment >= POSITIVE_THRESHOLD)

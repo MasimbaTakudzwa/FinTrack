@@ -132,3 +132,11 @@ def test_normalize_ts_tz_aware_converts_to_utc() -> None:
     out = yfinance_fetcher._normalize_ts(dt)
     assert out.tzinfo is UTC
     assert out.hour == 13
+
+
+def test_to_int_volume_rounds_not_truncates() -> None:
+    # yfinance reports float volumes; we round rather than truncate.
+    assert yfinance_fetcher._to_int_volume(1_234_566.9) == 1_234_567
+    assert yfinance_fetcher._to_int_volume(1_000_000.0) == 1_000_000
+    assert yfinance_fetcher._to_int_volume(None) == 0
+    assert yfinance_fetcher._to_int_volume(float("nan")) == 0

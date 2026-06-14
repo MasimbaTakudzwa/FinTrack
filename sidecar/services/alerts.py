@@ -35,9 +35,9 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import CursorResult, func, select, update
 
 from sidecar.db.engine import session_scope
 from sidecar.db.models import (
@@ -69,6 +69,16 @@ class AlertNotFoundError(AlertError):
 
 class AssetNotFoundError(AlertError):
     pass
+
+
+class AlreadyCrossedError(AlertError):
+    """A price alert's threshold is already satisfied at creation time.
+
+    Creating e.g. an ``above 150`` price alert while the price is already 200
+    would fire on the very next scan — a false positive against stale data, not
+    a genuine crossing. Only applies to PRICE alerts; sentiment alerts threshold
+    a rolling mean where "already crossed" has no meaningful semantics.
+    """
 
 
 @dataclass(frozen=True)
@@ -375,6 +385,20 @@ def create_alert(
         asset = s.get(Asset, asset_id)
         if asset is None:
             raise AssetNotFoundError(f"asset {asset_id} not found")
+
+        latest = _latest_point_by_asset(s, [asset_id]).get(asset_id)
+        # Reject a PRICE alert whose threshold is already crossed — it would
+        # fire instantly against a possibly-stale bar. Sentiment alerts are
+        # exempt (their observable is a rolling mean, not the last close).
+        if not is_sentiment and latest is not None and _is_crossed(
+            dir_enum, latest.close, thr
+        ):
+            word = "above" if dir_enum == AlertDirection.ABOVE else "below"
+            raise AlreadyCrossedError(
+                f"{asset.symbol} is already {word} {thr} "
+                f"(last price {latest.close}); the alert would fire immediately"
+            )
+
         alert = PriceAlert(
             asset_id=asset_id,
             threshold=thr,
@@ -386,7 +410,6 @@ def create_alert(
         )
         s.add(alert)
         s.flush()
-        latest = _latest_point_by_asset(s, [asset_id]).get(asset_id)
         return _hydrate_with_metric_value(s, alert, asset, latest)
 
 
@@ -477,9 +500,25 @@ def mark_notified(alert_id: int) -> AlertOut:
             raise AlertError(
                 f"alert {alert_id} has not triggered — nothing to mark as notified"
             )
-        if alert.notified_at is None:
-            alert.notified_at = now
-            s.flush()
+        # Atomic guarded stamp: only set ``notified_at`` while the row is still
+        # triggered-and-unnotified. A concurrent ``update_alert(reset=True)``
+        # that clears ``triggered_at`` between the read above and this write
+        # makes the WHERE fail (0 rows), so we never produce the impossible
+        # ``notified_at set / triggered_at null`` state that would silently
+        # swallow the next genuine trigger.
+        cast(
+            CursorResult[Any],
+            s.execute(
+                update(PriceAlert)
+                .where(
+                    PriceAlert.id == alert_id,
+                    PriceAlert.triggered_at.is_not(None),
+                    PriceAlert.notified_at.is_(None),
+                )
+                .values(notified_at=now)
+            ),
+        )
+        s.refresh(alert)
         latest = _latest_point_by_asset(s, [asset.id]).get(asset.id)
         return _hydrate_with_metric_value(s, alert, asset, latest)
 

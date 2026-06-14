@@ -103,7 +103,18 @@ def test_create_nonpositive_threshold_400(isolated_db: Path) -> None:
             json={"asset_id": aid, "threshold": "0", "direction": "above"},
         )
         assert resp.status_code == 400
-        assert "threshold" in resp.json()["detail"].lower()
+
+
+def test_create_already_crossed_409(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    _add_price(aid, Decimal("200"))
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/alerts/",
+            json={"asset_id": aid, "threshold": "150", "direction": "above"},
+        )
+        assert resp.status_code == 409
+        assert "already" in resp.json()["detail"].lower()
 
 
 def test_create_sentiment_alert_happy(isolated_db: Path) -> None:
@@ -215,8 +226,9 @@ def test_create_default_metric_is_price(isolated_db: Path) -> None:
 
 def test_list_hydrates_last_price(isolated_db: Path) -> None:
     aid = _seed_asset()
+    # Create below the eventual price (not yet crossed), then add the price.
+    svc.create_alert(asset_id=aid, threshold=Decimal("100"), direction="below")
     _add_price(aid, Decimal("123.45"))
-    svc.create_alert(asset_id=aid, threshold=Decimal("100"), direction="above")
     with TestClient(app) as client:
         resp = client.get("/api/alerts/")
         assert resp.status_code == 200
@@ -311,10 +323,10 @@ def test_update_alert_note_explicit_null_clears(isolated_db: Path) -> None:
 
 def test_update_alert_reset_clears_timestamps(isolated_db: Path) -> None:
     aid = _seed_asset()
-    _add_price(aid, Decimal("200"))
     a = svc.create_alert(
         asset_id=aid, threshold=Decimal("150"), direction="above"
     )
+    _add_price(aid, Decimal("200"))
     svc.check_alerts()
     svc.mark_notified(a.id)
     with TestClient(app) as client:
@@ -370,8 +382,8 @@ def test_pending_notifications_empty(isolated_db: Path) -> None:
 
 def test_pending_notifications_end_to_end(isolated_db: Path) -> None:
     aid = _seed_asset()
-    _add_price(aid, Decimal("200"))
     a = svc.create_alert(asset_id=aid, threshold=Decimal("150"), direction="above")
+    _add_price(aid, Decimal("200"))
     svc.check_alerts()
 
     with TestClient(app) as client:

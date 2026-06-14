@@ -22,6 +22,7 @@ from sidecar.services.alerts import (
     AlertError,
     AlertNotFoundError,
     AlertOut,
+    AlreadyCrossedError,
     AssetNotFoundError,
     create_alert,
     delete_alert,
@@ -156,6 +157,8 @@ def create_alert_route(body: CreateAlertIn) -> AlertOutModel:
         )
     except AssetNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AlreadyCrossedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except AlertError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

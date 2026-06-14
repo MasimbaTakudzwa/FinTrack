@@ -116,6 +116,48 @@ def test_create_alert_unknown_asset(isolated_db: Path) -> None:
         svc.create_alert(asset_id=9999, threshold=10, direction="above")
 
 
+def test_create_alert_rejects_already_crossed_above(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    _add_price(aid, Decimal("200.00"))
+    with pytest.raises(svc.AlreadyCrossedError):
+        svc.create_alert(asset_id=aid, threshold=Decimal("150.00"), direction="above")
+
+
+def test_create_alert_rejects_already_crossed_below(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    _add_price(aid, Decimal("90.00"))
+    with pytest.raises(svc.AlreadyCrossedError):
+        svc.create_alert(asset_id=aid, threshold=Decimal("100.00"), direction="below")
+
+
+def test_create_alert_allows_not_yet_crossed_with_price(isolated_db: Path) -> None:
+    aid = _seed_asset()
+    _add_price(aid, Decimal("140.00"))
+    # 140 < 150, so an "above 150" alert is a legitimate not-yet-crossed alert.
+    a = svc.create_alert(asset_id=aid, threshold=Decimal("150.00"), direction="above")
+    assert a.triggered_at is None
+
+
+def test_create_sentiment_alert_not_rejected_when_already_crossed(
+    isolated_db: Path,
+) -> None:
+    """The already-crossed guard is PRICE-only — a sentiment alert whose
+    current value already satisfies the threshold must still be created."""
+    aid = _seed_asset()
+    _add_price(aid, Decimal("200.00"))  # price present, but irrelevant here
+    _add_article(aid, sentiment=0.9)
+    _add_article(aid, sentiment=0.9, url="https://test/2")
+    # Mean sentiment ≈ 0.9 already above 0.4 — must NOT raise AlreadyCrossedError.
+    a = svc.create_alert(
+        asset_id=aid,
+        threshold=Decimal("0.4"),
+        direction="above",
+        metric="sentiment",
+        window_days=7,
+    )
+    assert a.metric == AlertMetric.SENTIMENT
+
+
 def test_create_alert_note_too_long(isolated_db: Path) -> None:
     aid = _seed_asset()
     with pytest.raises(svc.AlertError):
@@ -169,8 +211,9 @@ def test_list_alerts_active_only(isolated_db: Path) -> None:
 
 def test_list_alerts_hydrates_latest_price(isolated_db: Path) -> None:
     aid = _seed_asset()
+    # Create below the eventual price (not yet crossed), then add the price.
+    svc.create_alert(asset_id=aid, threshold=1, direction="below")
     _add_price(aid, Decimal("123.45"))
-    svc.create_alert(asset_id=aid, threshold=1, direction="above")
     listed = svc.list_alerts()
     assert listed[0].last_price == Decimal("123.45")
     assert listed[0].last_price_at is not None
@@ -214,8 +257,8 @@ def test_update_alert_fields(isolated_db: Path) -> None:
 
 def test_update_alert_reset_clears_timestamps(isolated_db: Path) -> None:
     aid = _seed_asset()
-    _add_price(aid, Decimal("200.00"))
     a = svc.create_alert(asset_id=aid, threshold=Decimal("150.00"), direction="above")
+    _add_price(aid, Decimal("200.00"))
     fired = svc.check_alerts()
     assert fired == 1
     got = svc.get_alert(a.id)
@@ -302,8 +345,8 @@ def test_check_alerts_above_fires_when_close_hits_threshold(
     isolated_db: Path,
 ) -> None:
     aid = _seed_asset()
-    _add_price(aid, Decimal("200.00"))
     a = svc.create_alert(asset_id=aid, threshold=Decimal("150.00"), direction="above")
+    _add_price(aid, Decimal("200.00"))
     assert svc.check_alerts() == 1
     got = svc.get_alert(a.id)
     assert got.triggered_at is not None
@@ -322,8 +365,8 @@ def test_check_alerts_below_fires_when_close_hits_threshold(
     isolated_db: Path,
 ) -> None:
     aid = _seed_asset()
-    _add_price(aid, Decimal("90.00"))
     a = svc.create_alert(asset_id=aid, threshold=Decimal("100.00"), direction="below")
+    _add_price(aid, Decimal("90.00"))
     assert svc.check_alerts() == 1
     got = svc.get_alert(a.id)
     assert got.triggered_at is not None
@@ -338,16 +381,17 @@ def test_check_alerts_below_does_not_fire_when_over(isolated_db: Path) -> None:
 
 def test_check_alerts_equal_threshold_fires(isolated_db: Path) -> None:
     aid = _seed_asset()
-    _add_price(aid, Decimal("100.00"))
-    # above: close >= threshold (inclusive)
+    # above: close >= threshold (inclusive). Create first (no price), then the
+    # bar that lands exactly on the threshold.
     svc.create_alert(asset_id=aid, threshold=Decimal("100.00"), direction="above")
+    _add_price(aid, Decimal("100.00"))
     assert svc.check_alerts() == 1
 
 
 def test_check_alerts_skips_inactive(isolated_db: Path) -> None:
     aid = _seed_asset()
-    _add_price(aid, Decimal("200.00"))
     a = svc.create_alert(asset_id=aid, threshold=Decimal("150.00"), direction="above")
+    _add_price(aid, Decimal("200.00"))
     svc.update_alert(a.id, is_active=False)
     assert svc.check_alerts() == 0
 
@@ -362,22 +406,23 @@ def test_check_alerts_skips_assets_without_price_data(isolated_db: Path) -> None
 def test_check_alerts_uses_latest_bar(isolated_db: Path) -> None:
     aid = _seed_asset()
     now = datetime.now(UTC)
-    # Old bar under threshold, latest bar over threshold — should fire.
+    # Create while under threshold, then a newer bar crosses over — should fire.
     _add_price(aid, Decimal("100.00"), ts=now - timedelta(hours=1))
-    _add_price(aid, Decimal("160.00"), ts=now)
     svc.create_alert(asset_id=aid, threshold=Decimal("150.00"), direction="above")
+    _add_price(aid, Decimal("160.00"), ts=now)
     assert svc.check_alerts() == 1
 
 
 def test_check_alerts_fires_each_independently(isolated_db: Path) -> None:
     aid1 = _seed_asset("AAPL", "Apple")
     aid2 = _seed_asset("MSFT", "Microsoft")
-    _add_price(aid1, Decimal("200.00"))
-    _add_price(aid2, Decimal("50.00"))
+    # Create all alerts before any price exists so none is rejected as already
+    # crossed; the third (above 300) genuinely won't fire at price 200.
     svc.create_alert(asset_id=aid1, threshold=Decimal("150.00"), direction="above")
     svc.create_alert(asset_id=aid2, threshold=Decimal("100.00"), direction="below")
-    # Third one should NOT fire.
     svc.create_alert(asset_id=aid1, threshold=Decimal("300.00"), direction="above")
+    _add_price(aid1, Decimal("200.00"))
+    _add_price(aid2, Decimal("50.00"))
     assert svc.check_alerts() == 2
 
 
@@ -390,13 +435,13 @@ def test_list_pending_notifications_returns_only_fired_not_notified(
     isolated_db: Path,
 ) -> None:
     aid = _seed_asset()
-    _add_price(aid, Decimal("200.00"))
     a_fire = svc.create_alert(
         asset_id=aid, threshold=Decimal("150.00"), direction="above"
     )
     svc.create_alert(
         asset_id=aid, threshold=Decimal("250.00"), direction="above"
     )  # won't fire
+    _add_price(aid, Decimal("200.00"))
     svc.check_alerts()
     pending = svc.list_pending_notifications()
     assert [p.id for p in pending] == [a_fire.id]
@@ -415,8 +460,8 @@ def test_mark_notified_requires_triggered(isolated_db: Path) -> None:
 
 def test_mark_notified_is_idempotent(isolated_db: Path) -> None:
     aid = _seed_asset()
-    _add_price(aid, Decimal("200.00"))
     a = svc.create_alert(asset_id=aid, threshold=Decimal("150.00"), direction="above")
+    _add_price(aid, Decimal("200.00"))
     svc.check_alerts()
     first = svc.mark_notified(a.id)
     second = svc.mark_notified(a.id)
@@ -597,9 +642,10 @@ def test_check_alerts_sentiment_excludes_unscored_articles(
 def test_check_alerts_mixed_metrics_in_one_pass(isolated_db: Path) -> None:
     """check_alerts handles price and sentiment alerts side-by-side."""
     aid = _seed_asset()
-    _add_price(aid, Decimal("200"))
     _add_article(aid, sentiment=-0.5)
     _add_article(aid, sentiment=-0.5, url="https://test/2")
+    # Create the price alert before the crossing price exists (else it'd be
+    # rejected as already-crossed); the sentiment alert is exempt from that.
     svc.create_alert(
         asset_id=aid, threshold=Decimal("150"), direction="above"
     )  # price → fires
@@ -610,6 +656,7 @@ def test_check_alerts_mixed_metrics_in_one_pass(isolated_db: Path) -> None:
         metric="sentiment",
         window_days=7,
     )  # sentiment → fires
+    _add_price(aid, Decimal("200"))
     assert svc.check_alerts() == 2
 
 

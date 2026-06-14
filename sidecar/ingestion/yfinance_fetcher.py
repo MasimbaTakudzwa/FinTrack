@@ -55,7 +55,10 @@ def _to_int_volume(v: Any) -> int:
         return 0
     if f != f:
         return 0
-    return int(f)
+    # yfinance reports volume as a float; round rather than truncate so a value
+    # like 1_234_566.9 doesn't become 1_234_566. Applies to both 5m and 1d bars
+    # (Phase 2 routes daily bars through this same path).
+    return round(f)
 
 
 def _normalize_ts(ts: Any) -> datetime:

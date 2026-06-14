@@ -54,6 +54,33 @@ DEFAULT_CONFIG = {
 }
 
 
+def test_reconfigure_does_not_refire_interval_jobs(
+    paused_scheduler: BackgroundScheduler,
+) -> None:
+    """A settings save (second register) must NOT reset interval jobs to fire
+    now — otherwise changing one unrelated setting triggers a refetch burst
+    against rate-limited upstreams.
+    """
+    # First register: fire-on-first-add sets next_run_time≈now.
+    _register_jobs(paused_scheduler, dict(DEFAULT_CONFIG))
+    first = paused_scheduler.get_job("ingest_prices").next_run_time
+    assert first is not None
+
+    after_first = datetime.now(UTC)
+    # Second register with a different interval (simulating a settings save).
+    # Without an explicit next_run_time, the trigger's next fire is ~now+interval
+    # — proving the job was NOT re-pinned to "now".
+    _register_jobs(
+        paused_scheduler,
+        dict(DEFAULT_CONFIG, **{"ingest_prices.interval_minutes": 30}),
+    )
+    second = paused_scheduler.get_job("ingest_prices").next_run_time
+    assert second is not None
+    assert second >= after_first + timedelta(minutes=20), (
+        "reconfigure must not re-fire interval jobs immediately"
+    )
+
+
 def test_register_jobs_adds_ingest_prices_with_default_interval(
     paused_scheduler: BackgroundScheduler,
 ) -> None:
