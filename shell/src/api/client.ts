@@ -314,6 +314,8 @@ export function getPriceSeries(
     from?: string;
     to?: string;
     limit?: number;
+    /** Bar resolution: "5m" (intraday, default) or "1d" (daily closes). */
+    interval?: string;
     signal?: AbortSignal;
   } = {},
 ): Promise<PriceSeries> {
@@ -322,6 +324,7 @@ export function getPriceSeries(
       from: opts.from,
       to: opts.to,
       limit: opts.limit,
+      interval: opts.interval,
     },
     signal: opts.signal,
   });

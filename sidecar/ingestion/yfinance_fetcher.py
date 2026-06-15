@@ -114,9 +114,15 @@ def _download(symbols: Sequence[str], *, period: str, interval: str) -> Any:
     raise FetcherError(f"yfinance download failed after {MAX_ATTEMPTS} attempts") from last_exc
 
 
+def _is_daily_interval(interval: str) -> bool:
+    """True for day-or-coarser intervals (``1d``, ``1wk``, ``1mo`` …)."""
+    return interval.endswith(("d", "wk", "mo"))
+
+
 def _bars_for_symbol(symbol: str, frame: Any, interval: str) -> list[PriceBar]:
     if frame is None or frame.empty:
         return []
+    daily = _is_daily_interval(interval)
     bars: list[PriceBar] = []
     for ts, row in frame.iterrows():
         o = _to_decimal(row.get("Open"))
@@ -126,10 +132,20 @@ def _bars_for_symbol(symbol: str, frame: Any, interval: str) -> list[PriceBar]:
         if None in (o, h, low, c):
             continue
         assert o is not None and h is not None and low is not None and c is not None
+        bar_ts = _normalize_ts(ts)
+        if daily:
+            # Floor daily bars to UTC midnight. yfinance timestamps the
+            # in-progress current-day bar at the live market time, not midnight,
+            # so without this every intraday run of the daily job creates a
+            # *new* "today" row (15:35, 15:40, …) that never dedups against the
+            # eventual settled daily bar — polluting the daily series with
+            # intraday-spaced points. Midnight makes (asset_id, date) the de
+            # facto key so today's bar updates in place.
+            bar_ts = bar_ts.replace(hour=0, minute=0, second=0, microsecond=0)
         bars.append(
             PriceBar(
                 symbol=symbol,
-                timestamp=_normalize_ts(ts),
+                timestamp=bar_ts,
                 open=o,
                 high=h,
                 low=low,

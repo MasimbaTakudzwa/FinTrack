@@ -140,3 +140,25 @@ def test_to_int_volume_rounds_not_truncates() -> None:
     assert yfinance_fetcher._to_int_volume(1_000_000.0) == 1_000_000
     assert yfinance_fetcher._to_int_volume(None) == 0
     assert yfinance_fetcher._to_int_volume(float("nan")) == 0
+
+
+def test_bars_for_symbol_floors_daily_to_midnight() -> None:
+    # Daily fetch whose source row carries an intraday timestamp (yfinance does
+    # this for the in-progress "today" bar) must be floored to UTC midnight.
+    frame = _single_symbol_frame()  # index at 13:00 / 13:05
+    daily = yfinance_fetcher._bars_for_symbol("AAPL", frame, "1d")
+    assert all(
+        b.timestamp.hour == 0 and b.timestamp.minute == 0 and b.timestamp.second == 0
+        for b in daily
+    )
+    # 5m bars keep their intraday time-of-day.
+    intraday = yfinance_fetcher._bars_for_symbol("AAPL", frame, "5m")
+    assert any(b.timestamp.hour != 0 or b.timestamp.minute != 0 for b in intraday)
+
+
+def test_is_daily_interval() -> None:
+    assert yfinance_fetcher._is_daily_interval("1d")
+    assert yfinance_fetcher._is_daily_interval("1wk")
+    assert yfinance_fetcher._is_daily_interval("1mo")
+    assert not yfinance_fetcher._is_daily_interval("5m")
+    assert not yfinance_fetcher._is_daily_interval("1h")

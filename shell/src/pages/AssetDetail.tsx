@@ -51,7 +51,11 @@ import { useResolvedTheme } from "../stores/useSettings";
 
 interface State {
   asset: Asset | null;
+  /** Intraday 5-minute series (powers 1H/4H/1D timeframes). */
   series: PriceSeries | null;
+  /** Daily-close series (powers 3D/1W/All timeframes — intraday bars only
+   *  ever span ~1 day, so the multi-day views need daily resolution). */
+  dailySeries: PriceSeries | null;
   quote: Quote | null;
   loading: boolean;
   error: string | null;
@@ -61,6 +65,7 @@ interface State {
 const INITIAL: State = {
   asset: null,
   series: null,
+  dailySeries: null,
   quote: null,
   loading: true,
   error: null,
@@ -127,9 +132,16 @@ export function AssetDetail() {
     let cancelled = false;
     (async () => {
       try {
-        const [assets, series, quote] = await Promise.all([
+        const [assets, series, dailySeries, quote] = await Promise.all([
           listAssets({ activeOnly: false, signal: controller.signal }),
           getPriceSeries(symbol, { limit: MAX_BARS, signal: controller.signal }),
+          // Daily closes for the 3D/1W/All timeframes. Tolerate absence (a
+          // brand-new asset has no daily bars until the daily job runs).
+          getPriceSeries(symbol, {
+            interval: "1d",
+            limit: MAX_BARS,
+            signal: controller.signal,
+          }).catch(() => null),
           // Day change comes from the server quote; tolerate its absence
           // (e.g. no daily bars yet) so the page still renders.
           getQuote(symbol, controller.signal).catch(() => null),
@@ -145,6 +157,7 @@ export function AssetDetail() {
         setState({
           asset,
           series,
+          dailySeries,
           quote,
           loading: false,
           error: null,
@@ -219,6 +232,7 @@ export function AssetDetail() {
           key={state.asset.symbol}
           asset={state.asset}
           series={state.series}
+          dailySeries={state.dailySeries}
           quote={state.quote}
           dark={resolved === "dark"}
         />
@@ -319,11 +333,13 @@ const FORECAST_INITIAL: ForecastState = {
 function AssetBody({
   asset,
   series,
+  dailySeries,
   quote,
   dark,
 }: {
   asset: Asset;
   series: PriceSeries;
+  dailySeries: PriceSeries | null;
   quote: Quote | null;
   dark: boolean;
 }) {
@@ -463,10 +479,15 @@ function AssetBody({
   };
 
   const tf = TIMEFRAMES.find((t) => t.id === tfId) ?? TIMEFRAMES[TIMEFRAMES.length - 1];
-  const visiblePoints = useMemo(
-    () => sliceToTimeframe(series.points, tf),
-    [series.points, tf],
-  );
+  // Intraday (5m) bars only ever span ~1 day, so 1D/3D/1W all slice to the same
+  // single session and look identical. Multi-day timeframes therefore read the
+  // daily-close series instead; short timeframes keep the 5m series.
+  const visiblePoints = useMemo(() => {
+    const src = isMultiDayTimeframe(tf.id)
+      ? (dailySeries?.points ?? [])
+      : series.points;
+    return sliceToTimeframe(src, tf);
+  }, [series.points, dailySeries, tf]);
 
   const last = visiblePoints[visiblePoints.length - 1];
   // Last price + day change come from the server quote (previous-session close
@@ -755,7 +776,10 @@ function AssetBody({
         </aside>
       </div>
 
-      <PerformancePanel allPoints={series.points} />
+      <PerformancePanel
+        intradayPoints={series.points}
+        dailyPoints={dailySeries?.points ?? []}
+      />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <ForecastAccuracyPanel
@@ -904,28 +928,39 @@ const PERF_BUCKETS: PerfBucket[] = [
   { id: "1w", label: "1w", windowMs: 7 * 24 * 60 * 60 * 1000 },
 ];
 
-function PerformancePanel({ allPoints }: { allPoints: PricePoint[] }) {
-  if (allPoints.length === 0) return null;
-  const lastPt = allPoints[allPoints.length - 1];
-  const lastPrice = Number(lastPt.close);
-  const lastMs = parseBarMs(lastPt.timestamp);
+const PERF_ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+/** % change over `windowMs`, anchored to the source's own last bar (so a stale
+ *  daily series still yields a valid "last N days" number). windowMs=Infinity
+ *  anchors to the oldest bar ("All"). */
+function pctOverWindow(points: PricePoint[], windowMs: number): number | null {
+  if (points.length < 2) return null;
+  const last = points[points.length - 1];
+  const lastPrice = Number(last.close);
+  const cutoff = parseBarMs(last.timestamp) - windowMs;
+  const anchor = points.find((p) => parseBarMs(p.timestamp) >= cutoff);
+  if (!anchor) return null;
+  const anchorPrice = Number(anchor.close);
+  return anchorPrice ? ((lastPrice - anchorPrice) / anchorPrice) * 100 : null;
+}
+
+function PerformancePanel({
+  intradayPoints,
+  dailyPoints,
+}: {
+  intradayPoints: PricePoint[];
+  dailyPoints: PricePoint[];
+}) {
+  if (intradayPoints.length === 0 && dailyPoints.length === 0) return null;
 
   const rows = PERF_BUCKETS.map((b) => {
-    const cutoff = lastMs - b.windowMs;
-    const anchor = allPoints.find((p) => parseBarMs(p.timestamp) >= cutoff);
-    if (!anchor) return { ...b, pct: null, available: false };
-    const anchorPrice = Number(anchor.close);
-    if (!anchorPrice) return { ...b, pct: null, available: true };
-    return {
-      ...b,
-      pct: ((lastPrice - anchorPrice) / anchorPrice) * 100,
-      available: true,
-    };
+    // Windows longer than a day read the daily series — intraday bars only
+    // span ~1 session, so a "1w" change computed from 5m data is meaningless.
+    const source = b.windowMs > PERF_ONE_DAY_MS ? dailyPoints : intradayPoints;
+    return { ...b, pct: pctOverWindow(source, b.windowMs) };
   });
-  // Also compute "All" — from the oldest bar we have.
-  const oldest = Number(allPoints[0].close);
-  const allPct =
-    oldest && allPoints.length > 1 ? ((lastPrice - oldest) / oldest) * 100 : null;
+  // "All" — full daily history.
+  const allPct = pctOverWindow(dailyPoints, Number.POSITIVE_INFINITY);
 
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
