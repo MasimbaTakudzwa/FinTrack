@@ -20,6 +20,7 @@ from ml.forecast import InsufficientDataError
 from ml.jobs import (
     DEFAULT_HORIZON_DAYS,
     UnknownSymbolError,
+    refresh_stale_forecasts,
     symbols_eligible_for_forecast,
     train_forecasts,
     train_one,
@@ -221,3 +222,52 @@ def _resolve_asset_id(symbol: str) -> int:
             select(Asset.id).where(Asset.symbol == symbol)
         ).scalar_one()
         return int(aid)
+
+
+def _add_daily_bar(asset_id: int, d: date, close: float = 200.0) -> None:
+    with session_scope() as s:
+        s.add(
+            PricePoint(
+                asset_id=asset_id,
+                timestamp=datetime(d.year, d.month, d.day, tzinfo=UTC),
+                interval="1d",
+                open=Decimal(str(close)),
+                high=Decimal(str(close)),
+                low=Decimal(str(close)),
+                close=Decimal(str(close)),
+                volume=1_000_000,
+            )
+        )
+
+
+def test_refresh_trains_when_no_forecast(isolated_db: Path) -> None:
+    aid = _seed_asset_with_daily_closes("AAPL", n_rows=120)
+    assert load_forecast(aid) is None
+
+    retrained = refresh_stale_forecasts()
+    assert retrained == 1
+    fc = load_forecast(aid)
+    assert fc is not None
+    # Anchored to the newest daily bar (120 days from 2024-01-01).
+    assert fc.last_close_date == date(2024, 1, 1) + timedelta(days=119)
+
+
+def test_refresh_skips_up_to_date(isolated_db: Path) -> None:
+    _seed_asset_with_daily_closes("AAPL", n_rows=120)
+    assert refresh_stale_forecasts() == 1  # first pass trains
+    # Second pass: nothing changed → no retrain.
+    assert refresh_stale_forecasts() == 0
+
+
+def test_refresh_retrains_when_a_new_bar_lands(isolated_db: Path) -> None:
+    aid = _seed_asset_with_daily_closes("AAPL", n_rows=120)
+    refresh_stale_forecasts()
+    before = load_forecast(aid)
+    assert before is not None
+
+    # A new daily bar arrives the next day → forecast is now stale.
+    _add_daily_bar(aid, before.last_close_date + timedelta(days=1))
+    assert refresh_stale_forecasts() == 1
+    after = load_forecast(aid)
+    assert after is not None
+    assert after.last_close_date > before.last_close_date

@@ -46,7 +46,7 @@ from ml.forecast import (
     InsufficientDataError,
     forecast_series,
 )
-from ml.persistence import save_forecast
+from ml.persistence import load_forecast, save_forecast
 from ml.sentiment import SentimentBackendError, score_many
 from sidecar.db.engine import session_scope
 from sidecar.db.models import Article, Asset, PricePoint
@@ -174,6 +174,69 @@ def train_forecasts(
         effective_engine,
     )
     return successes
+
+
+def refresh_stale_forecasts(
+    *,
+    horizon_days: int = DEFAULT_HORIZON_DAYS,
+    engine: ForecastEngine | None = None,
+) -> int:
+    """Retrain only assets whose stored forecast is missing or out of date.
+
+    A forecast is "stale" when its ``last_close_date`` is behind the latest
+    daily bar we have for that asset (or there's no stored forecast at all).
+    Cheap to call on launch and on a short interval: assets that are already
+    current are skipped without fitting a model.
+
+    This exists because the weekly ``train_forecasts`` cron only fires when the
+    desktop app happens to be open at the scheduled time — which for a
+    sporadically-used app means forecasts can freeze for weeks. Running this on
+    startup (and periodically) keeps the projection anchored to the present
+    instead of whenever the app last happened to be open on a Sunday.
+    """
+    effective_engine = _resolve_engine(engine)
+    retrained = 0
+    with session_scope() as session:
+        assets = _active_asset_symbol_ids(session)
+
+    for asset_id, symbol in assets:
+        with session_scope() as session:
+            closes = _load_daily_closes(session, asset_id)
+        if not closes:
+            continue
+        latest_date = closes[-1][0]
+        existing = load_forecast(asset_id)
+        if existing is not None and existing.last_close_date >= latest_date:
+            continue  # forecast already anchored to the newest daily bar
+
+        try:
+            result = forecast_series(
+                closes, horizon_days=horizon_days, engine=effective_engine
+            )
+            save_forecast(asset_id, result)
+            retrained += 1
+            logger.info(
+                "refresh_stale_forecasts: retrained %s (last_close_date=%s)",
+                symbol,
+                result.last_close_date,
+            )
+        except InsufficientDataError as exc:
+            logger.info(
+                "refresh_stale_forecasts: skipping %s (insufficient data: %s)",
+                symbol,
+                exc,
+            )
+        except ForecastFitError as exc:
+            logger.warning(
+                "refresh_stale_forecasts: fit failed for %s: %s", symbol, exc
+            )
+        except Exception:  # pragma: no cover — truly defensive
+            logger.exception(
+                "refresh_stale_forecasts: unexpected error for %s", symbol
+            )
+
+    logger.info("refresh_stale_forecasts: retrained %d stale forecast(s)", retrained)
+    return retrained
 
 
 def train_one(

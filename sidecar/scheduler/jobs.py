@@ -440,6 +440,28 @@ def train_forecasts_job() -> int:
         return 0
 
 
+def refresh_forecasts_job() -> int:
+    """Scheduler entry: retrain forecasts that have fallen behind the latest
+    daily bar. Fires on launch + on a short interval so the projection stays
+    anchored to the present even when the weekly cron never coincides with the
+    app being open. Cheap — up-to-date assets are skipped without fitting.
+    """
+    try:
+        from ml.jobs import refresh_stale_forecasts
+
+        return refresh_stale_forecasts()
+    except ImportError as exc:
+        logger.info(
+            "refresh_forecasts_job: ml package unavailable (%s) — "
+            "install requirements-ml.txt to enable forecasting",
+            exc,
+        )
+        return 0
+    except Exception:  # pragma: no cover — defensive
+        logger.exception("refresh_forecasts_job failed")
+        return 0
+
+
 def score_news_sentiment_job() -> int:
     """Scheduler entry for the periodic VADER sentiment backfill.
 

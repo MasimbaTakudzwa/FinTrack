@@ -22,6 +22,7 @@ from sidecar.scheduler.jobs import (
     ingest_news,
     ingest_prices,
     ingest_prices_daily,
+    refresh_forecasts_job,
     score_news_sentiment_job,
     train_forecasts_job,
 )
@@ -192,9 +193,26 @@ def _register_jobs(scheduler: BackgroundScheduler, config: dict[str, Any]) -> No
             name="Weekly SARIMAX retrain for every active asset",
             replace_existing=True,
         )
+        # Lightweight companion to the weekly cron: on launch (and every 6h)
+        # retrain only forecasts that have fallen behind the latest daily bar.
+        # The weekly cron only helps if the app is open on that day/hour — for
+        # a sporadically-used desktop app that almost never happens, so without
+        # this the forecast freezes at whenever it was last trained. Up-to-date
+        # assets are skipped without fitting, so the launch cost is near-zero
+        # once everything is current.
+        scheduler.add_job(
+            refresh_forecasts_job,
+            trigger=IntervalTrigger(minutes=360),
+            id="refresh_forecasts",
+            name="Retrain stale forecasts (launch + 6h)",
+            replace_existing=True,
+            **_first_add_kwargs(scheduler, "refresh_forecasts", now),
+        )
     else:
         with contextlib.suppress(JobLookupError):
             scheduler.remove_job("train_forecasts")
+        with contextlib.suppress(JobLookupError):
+            scheduler.remove_job("refresh_forecasts")
 
     if bool(config["score_news_sentiment.enabled"]):
         # Backfill any unscored articles via VADER. The new-article path is

@@ -616,17 +616,19 @@ function AssetBody({
               <button
                 type="button"
                 onClick={() => setShowForecast((v) => !v)}
-                disabled={fc.status !== "ready"}
+                disabled={fc.status !== "ready" || !isMultiDayTimeframe(tfId)}
                 title={
-                  fc.status === "ready"
-                    ? showForecast
-                      ? "Hide forecast overlay"
-                      : "Show forecast overlay"
-                    : "Forecast not ready yet"
+                  !isMultiDayTimeframe(tfId)
+                    ? "Forecast is a 14-day daily projection — shown on the 3D/1W/All timeframes"
+                    : fc.status === "ready"
+                      ? showForecast
+                        ? "Hide forecast overlay"
+                        : "Show forecast overlay"
+                      : "Forecast not ready yet"
                 }
                 className={[
                   "inline-flex items-center gap-1 rounded-sm border px-2 py-0.5 transition-colors",
-                  showForecast && fc.status === "ready"
+                  showForecast && fc.status === "ready" && isMultiDayTimeframe(tfId)
                     ? "border-indigo-500/60 bg-indigo-500/10 text-indigo-700 dark:border-indigo-400/60 dark:text-indigo-300"
                     : "border-zinc-200 text-zinc-500 hover:text-zinc-800 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200",
                 ].join(" ")}
@@ -707,7 +709,9 @@ function AssetBody({
             <CandleChart
               points={visiblePoints}
               dark={dark}
-              forecast={showForecast ? fc.data : null}
+              forecast={
+                showForecast && isMultiDayTimeframe(tfId) ? fc.data : null
+              }
               sentiment={
                 showSentimentMarkers && isMultiDayTimeframe(tfId)
                   ? sentimentSeries
