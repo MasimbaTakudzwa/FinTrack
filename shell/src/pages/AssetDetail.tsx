@@ -375,29 +375,60 @@ function AssetBody({
   >(null);
 
   // Fetch the persisted forecast on mount. AssetBody is keyed on
-  // ``asset.symbol`` by the parent, so this effect only fires once per mount
-  // — initial state (``FORECAST_INITIAL.status = "loading"``) already drives
-  // the loading UI until the .then/.catch handlers flip status.
-  // 404 is the expected state for assets that haven't been trained yet —
-  // surface as ``not_trained`` so the panel shows a "Train now" CTA instead
-  // of an error.
+  // ``asset.symbol`` by the parent, so this effect only fires once per mount.
+  // 404 → ``not_trained`` (shows a "Train now" CTA).
+  //
+  // Self-heal: if the stored forecast is *behind* the latest daily bar (its
+  // training data is older than the data we now have), retrain it immediately
+  // so the user never sees a projection anchored in the past. This covers the
+  // race where the page loads before the launch-time bulk retrain finishes —
+  // without it, an asset opened during startup would show a stale forecast
+  // until manually refreshed. When the forecast is already current this is a
+  // no-op (no fit, no extra request).
   useEffect(() => {
     const controller = new AbortController();
-    getForecast(asset.symbol, controller.signal)
-      .then((data) => {
-        setFc({ data, status: "ready", error: null, retraining: false });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
+    let cancelled = false;
+    const latestDailyDate = dailySeries?.points.at(-1)?.timestamp.slice(0, 10);
+
+    void (async () => {
+      try {
+        const data = await getForecast(asset.symbol, controller.signal);
+        if (cancelled) return;
+        const stale =
+          !!latestDailyDate &&
+          data.last_close_date.slice(0, 10) < latestDailyDate;
+        if (!stale) {
+          setFc({ data, status: "ready", error: null, retraining: false });
+          return;
+        }
+        // Show the stale forecast immediately, flagged retraining, then swap
+        // in the fresh one when the fit returns.
+        setFc({ data, status: "ready", error: null, retraining: true });
+        try {
+          const fresh = await retrainForecast(asset.symbol);
+          if (!cancelled)
+            setFc({ data: fresh, status: "ready", error: null, retraining: false });
+        } catch {
+          // Retrain failed (e.g. transient) — keep showing the stale forecast
+          // rather than blanking the panel.
+          if (!cancelled)
+            setFc({ data, status: "ready", error: null, retraining: false });
+        }
+      } catch (err: unknown) {
+        if (cancelled || controller.signal.aborted) return;
         if (err instanceof ApiError && err.status === 404) {
           setFc({ data: null, status: "not_trained", error: null, retraining: false });
           return;
         }
         const msg = err instanceof Error ? err.message : String(err);
         setFc({ data: null, status: "error", error: msg, retraining: false });
-      });
-    return () => controller.abort();
-  }, [asset.symbol]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [asset.symbol, dailySeries]);
 
   // Pull the daily sentiment timeseries once per asset. Used by the
   // candle chart to flag strong-news days as colored markers. Errors
