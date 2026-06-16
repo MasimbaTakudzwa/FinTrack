@@ -1082,6 +1082,10 @@ export interface ForecastAccuracyReport {
   days: number;
   per_engine: EngineAccuracyEntry[];
   overall: EngineAccuracyEntry | null;
+  /** Naive "no change" random-walk baseline over the same pairs — the honesty
+   *  yardstick. `directional` is always null (a no-change forecast makes no
+   *  directional call). */
+  naive: EngineAccuracyEntry | null;
   actuals_available: number;
 }
 

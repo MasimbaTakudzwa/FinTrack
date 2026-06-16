@@ -41,6 +41,7 @@ import {
 } from "../api/client";
 import { AlertCreateModal } from "../components/AlertCreateModal";
 import { CandleChart } from "../components/CandleChart";
+import { bollingerBands, regressionChannel } from "../components/indicators";
 import { ForecastAccuracyPanel } from "../components/ForecastAccuracyPanel";
 import { NewsList } from "../components/NewsList";
 import { SentimentSummaryPanel } from "../components/SentimentSummaryPanel";
@@ -353,6 +354,10 @@ function AssetBody({
   const [measure, setMeasure] = useState<MeasureState>(MEASURE_EMPTY);
   const [fc, setFc] = useState<ForecastState>(FORECAST_INITIAL);
   const [showForecast, setShowForecast] = useState(false);
+  // Descriptive TA overlays on the daily chart (off by default). Gated to
+  // multi-day timeframes like the forecast/sentiment overlays.
+  const [showRegression, setShowRegression] = useState(false);
+  const [showBollinger, setShowBollinger] = useState(false);
   // Bumps after each successful retrain so the accuracy panel re-fetches.
   // We don't use `key` because re-mounting would lose the panel's last-
   // good numbers while the new fetch lands.
@@ -519,6 +524,18 @@ function AssetBody({
       : series.points;
     return sliceToTimeframe(src, tf);
   }, [series.points, dailySeries, tf]);
+
+  // Descriptive TA overlays, computed from the visible daily closes. Only on
+  // multi-day timeframes (they're daily-resolution indicators).
+  const overlaysEnabled = isMultiDayTimeframe(tf.id);
+  const regressionData = useMemo(
+    () => (overlaysEnabled && showRegression ? regressionChannel(visiblePoints) : null),
+    [overlaysEnabled, showRegression, visiblePoints],
+  );
+  const bollingerData = useMemo(
+    () => (overlaysEnabled && showBollinger ? bollingerBands(visiblePoints) : null),
+    [overlaysEnabled, showBollinger, visiblePoints],
+  );
 
   const last = visiblePoints[visiblePoints.length - 1];
   // Last price + day change come from the server quote (previous-session close
@@ -702,6 +719,46 @@ function AssetBody({
                 )}
                 Sentiment
               </button>
+              <button
+                type="button"
+                onClick={() => setShowRegression((v) => !v)}
+                disabled={!isMultiDayTimeframe(tfId)}
+                title={
+                  !isMultiDayTimeframe(tfId)
+                    ? "Trend channel is a daily indicator — shown on 3D/1W/All"
+                    : showRegression
+                      ? "Hide regression channel"
+                      : "Show regression channel (descriptive trend ± rails)"
+                }
+                className={[
+                  "inline-flex items-center gap-1 rounded-sm border px-2 py-0.5 transition-colors",
+                  showRegression && isMultiDayTimeframe(tfId)
+                    ? "border-teal-500/60 bg-teal-500/10 text-teal-700 dark:border-teal-400/60 dark:text-teal-300"
+                    : "border-zinc-200 text-zinc-500 hover:text-zinc-800 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200",
+                ].join(" ")}
+              >
+                Channel
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowBollinger((v) => !v)}
+                disabled={!isMultiDayTimeframe(tfId)}
+                title={
+                  !isMultiDayTimeframe(tfId)
+                    ? "Bollinger bands are a daily indicator — shown on 3D/1W/All"
+                    : showBollinger
+                      ? "Hide Bollinger bands"
+                      : "Show Bollinger bands (SMA ± 2σ)"
+                }
+                className={[
+                  "inline-flex items-center gap-1 rounded-sm border px-2 py-0.5 transition-colors",
+                  showBollinger && isMultiDayTimeframe(tfId)
+                    ? "border-orange-500/60 bg-orange-500/10 text-orange-700 dark:border-orange-400/60 dark:text-orange-300"
+                    : "border-zinc-200 text-zinc-500 hover:text-zinc-800 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200",
+                ].join(" ")}
+              >
+                Bollinger
+              </button>
               <label className="inline-flex items-center gap-1.5">
                 <span>Macro:</span>
                 <select
@@ -748,6 +805,8 @@ function AssetBody({
                   ? sentimentSeries
                   : null
               }
+              regressionChannel={regressionData}
+              bollinger={bollingerData}
               macroOverlay={
                 macroSeriesId && macroPoints
                   ? {

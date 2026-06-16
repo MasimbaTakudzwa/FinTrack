@@ -23,6 +23,8 @@ import type {
   PricePoint,
   SentimentTimeseriesPoint,
 } from "../api/client";
+import { ForecastFan, type FanPoint } from "./forecastFan";
+import type { ChannelData } from "./indicators";
 
 interface MeasurePoint {
   time: UTCTimestamp;
@@ -70,6 +72,10 @@ interface Props {
    * is shown in the chart legend / tooltip.
    */
   macroOverlay?: { points: { date: string; value: number }[]; label: string } | null;
+  /** Descriptive linear-regression channel (mid + ±k·σ rails). Null hides it. */
+  regressionChannel?: ChannelData | null;
+  /** Descriptive Bollinger bands (SMA ± 2σ). Null hides it. */
+  bollinger?: ChannelData | null;
 }
 
 /** Minimum |mean compound| to surface a day as a chart marker. Matches
@@ -121,6 +127,8 @@ function palette(dark: boolean) {
         sentimentPositive: "#34d399", // emerald-400
         sentimentNegative: "#fb7185", // rose-400
         macro: "#fbbf24", // amber-400
+        regression: "#2dd4bf", // teal-400
+        bollinger: "#fb923c", // orange-400
       }
     : {
         background: "transparent",
@@ -136,6 +144,8 @@ function palette(dark: boolean) {
         sentimentPositive: "#10b981", // emerald-500
         sentimentNegative: "#f43f5e", // rose-500
         macro: "#d97706", // amber-600
+        regression: "#0d9488", // teal-600
+        bollinger: "#ea580c", // orange-600
       };
 }
 
@@ -164,19 +174,24 @@ function toLine(
 }
 
 /**
- * Forecast overlay series handles, held by the outer chart effect and
- * cleaned up together. We keep five series: a dashed median, plus four
- * bounded lines tracing the 80%/95% CI edges. Shaded bands would be
- * cleaner visually but lightweight-charts v5 has no first-class "area
- * between two curves" primitive, and the edge-line approach is still
- * unambiguous — 95% lines sit outside 80% lines.
+ * Forecast overlay handle. The dashed median stays a LineSeries; the 80%/95%
+ * tolerance bands are filled as a shaded cone by the ForecastFan primitive
+ * (see forecastFan.ts) — lightweight-charts v5 has no native area-between-
+ * curves series, so the fan paints the polygons directly on the pane canvas.
  */
 interface ForecastSeries {
   median: ISeriesApi<"Line">;
-  lower80: ISeriesApi<"Line">;
-  upper80: ISeriesApi<"Line">;
-  lower95: ISeriesApi<"Line">;
-  upper95: ISeriesApi<"Line">;
+}
+
+/** Three line-series handles for a descriptive channel overlay (mid + rails). */
+interface ChannelSeries {
+  mid: ISeriesApi<"Line">;
+  upper: ISeriesApi<"Line">;
+  lower: ISeriesApi<"Line">;
+}
+
+function channelToLineData(pts: { time: number; value: number }[]): LineData<UTCTimestamp>[] {
+  return pts.map((p) => ({ time: p.time as UTCTimestamp, value: p.value }));
 }
 
 export function CandleChart({
@@ -187,6 +202,8 @@ export function CandleChart({
   forecast,
   sentiment,
   macroOverlay,
+  regressionChannel,
+  bollinger,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -194,6 +211,9 @@ export function CandleChart({
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const forecastRef = useRef<ForecastSeries | null>(null);
+  const fanRef = useRef<ForecastFan | null>(null);
+  const regRef = useRef<ChannelSeries | null>(null);
+  const bollRef = useRef<ChannelSeries | null>(null);
   const macroRef = useRef<ISeriesApi<"Line"> | null>(null);
   // Keep the latest onClick inside a ref so the subscribe effect doesn't
   // resubscribe on every render (subscribing + unsubscribing re-triggers
@@ -260,26 +280,14 @@ export function CandleChart({
       lineWidth: 2,
       lineStyle: LineStyle.Dashed,
     });
-    const forecastLower80 = chart.addSeries(LineSeries, {
-      ...commonLineOpts,
-      color: p.forecastBand80,
-      lineWidth: 1,
+    // Shaded tolerance cone behind the median — drawn by a pane primitive
+    // attached to the candle series (filled 95% + nested 80% bands). Low-alpha
+    // indigo fills so the candles + median stay legible through the cone.
+    const fan = new ForecastFan({
+      band95: dark ? "rgba(165, 180, 252, 0.12)" : "rgba(99, 102, 241, 0.10)",
+      band80: dark ? "rgba(165, 180, 252, 0.26)" : "rgba(99, 102, 241, 0.22)",
     });
-    const forecastUpper80 = chart.addSeries(LineSeries, {
-      ...commonLineOpts,
-      color: p.forecastBand80,
-      lineWidth: 1,
-    });
-    const forecastLower95 = chart.addSeries(LineSeries, {
-      ...commonLineOpts,
-      color: p.forecastBand95,
-      lineWidth: 1,
-    });
-    const forecastUpper95 = chart.addSeries(LineSeries, {
-      ...commonLineOpts,
-      color: p.forecastBand95,
-      lineWidth: 1,
-    });
+    candle.attachPrimitive(fan);
 
     // Macro overlay series — separate price scale on the LEFT side of
     // the chart so a unit-mismatched indicator (FedFunds in % vs price
@@ -298,17 +306,34 @@ export function CandleChart({
       scaleMargins: { top: 0.1, bottom: 0.4 },
     });
 
+    // Descriptive overlays (regression channel = teal, Bollinger = amber) on
+    // the right price scale alongside the candles. Mid solid, rails dashed.
+    const mkChannel = (color: string): ChannelSeries => ({
+      mid: chart.addSeries(LineSeries, { ...commonLineOpts, color, lineWidth: 2 }),
+      upper: chart.addSeries(LineSeries, {
+        ...commonLineOpts,
+        color,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+      }),
+      lower: chart.addSeries(LineSeries, {
+        ...commonLineOpts,
+        color,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+      }),
+    });
+    const reg = mkChannel(p.regression);
+    const boll = mkChannel(p.bollinger);
+
     chartRef.current = chart;
     candleRef.current = candle;
     volumeRef.current = volume;
     markersRef.current = markers;
-    forecastRef.current = {
-      median: forecastMedian,
-      lower80: forecastLower80,
-      upper80: forecastUpper80,
-      lower95: forecastLower95,
-      upper95: forecastUpper95,
-    };
+    forecastRef.current = { median: forecastMedian };
+    fanRef.current = fan;
+    regRef.current = reg;
+    bollRef.current = boll;
     macroRef.current = macro;
 
     const handleClick = (param: MouseEventParams) => {
@@ -329,9 +354,30 @@ export function CandleChart({
       volumeRef.current = null;
       markersRef.current = null;
       forecastRef.current = null;
+      fanRef.current = null;
+      regRef.current = null;
+      bollRef.current = null;
       macroRef.current = null;
     };
   }, [dark, height]);
+
+  // Push descriptive overlay data (regression channel / Bollinger bands) into
+  // their series; empty arrays hide them.
+  useEffect(() => {
+    const reg = regRef.current;
+    if (!reg) return;
+    reg.mid.setData(regressionChannel ? channelToLineData(regressionChannel.mid) : []);
+    reg.upper.setData(regressionChannel ? channelToLineData(regressionChannel.upper) : []);
+    reg.lower.setData(regressionChannel ? channelToLineData(regressionChannel.lower) : []);
+  }, [regressionChannel]);
+
+  useEffect(() => {
+    const boll = bollRef.current;
+    if (!boll) return;
+    boll.mid.setData(bollinger ? channelToLineData(bollinger.mid) : []);
+    boll.upper.setData(bollinger ? channelToLineData(bollinger.upper) : []);
+    boll.lower.setData(bollinger ? channelToLineData(bollinger.lower) : []);
+  }, [bollinger]);
 
   useEffect(() => {
     if (!candleRef.current || !volumeRef.current) return;
@@ -402,20 +448,35 @@ export function CandleChart({
   // a transiently-null handle.
   useEffect(() => {
     const f = forecastRef.current;
-    if (!f) return;
+    const fan = fanRef.current;
+    if (!f || !fan) return;
     if (!forecast) {
       f.median.setData([]);
-      f.lower80.setData([]);
-      f.upper80.setData([]);
-      f.lower95.setData([]);
-      f.upper95.setData([]);
+      fan.setData([]);
       return;
     }
     f.median.setData(toLine(forecast, (p) => p.yhat));
-    f.lower80.setData(toLine(forecast, (p) => p.lower_80));
-    f.upper80.setData(toLine(forecast, (p) => p.upper_80));
-    f.lower95.setData(toLine(forecast, (p) => p.lower_95));
-    f.upper95.setData(toLine(forecast, (p) => p.upper_95));
+    // Anchor the cone at the last actual close (zero-width) so it visibly
+    // emanates from the price, then fans out over the horizon.
+    const anchorTime = barTimeSeconds(`${forecast.last_close_date}T00:00:00Z`) as UTCTimestamp;
+    const anchorPrice = Number(forecast.last_close);
+    const fanPoints: FanPoint[] = [
+      {
+        time: anchorTime,
+        lower95: anchorPrice,
+        upper95: anchorPrice,
+        lower80: anchorPrice,
+        upper80: anchorPrice,
+      },
+      ...forecast.points.map((p) => ({
+        time: barTimeSeconds(`${p.forecast_date}T00:00:00Z`) as UTCTimestamp,
+        lower95: p.lower_95,
+        upper95: p.upper_95,
+        lower80: p.lower_80,
+        upper80: p.upper_80,
+      })),
+    ];
+    fan.setData(fanPoints);
     chartRef.current?.timeScale().fitContent();
   }, [forecast]);
 

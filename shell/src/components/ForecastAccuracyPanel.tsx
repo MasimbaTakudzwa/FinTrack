@@ -92,7 +92,7 @@ function Body({ state }: { state: State }) {
     );
   }
 
-  const { per_engine, overall } = state.data;
+  const { per_engine, overall, naive } = state.data;
 
   if (per_engine.length === 0) {
     return (
@@ -115,7 +115,10 @@ function Body({ state }: { state: State }) {
           metrics will appear once the predicted dates pass.
         </p>
       ) : (
-        <Headline overall={overall} />
+        <>
+          <Headline overall={overall} />
+          <BaselineVerdict overall={overall} naive={naive} />
+        </>
       )}
 
       <div className="overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-800">
@@ -157,6 +160,56 @@ function Headline({ overall }: { overall: EngineAccuracyEntry | null }) {
         {overall.evaluable_points === 1 ? "" : "s"}
       </span>
     </div>
+  );
+}
+
+/**
+ * Honest yardstick: how the model's error compares to a naive "assume no
+ * change" random-walk baseline over the same window. For a 2-week daily-close
+ * forecast these are usually within a hair of each other — by design we say so
+ * plainly rather than dressing up the number.
+ */
+function BaselineVerdict({
+  overall,
+  naive,
+}: {
+  overall: EngineAccuracyEntry | null;
+  naive: EngineAccuracyEntry | null;
+}) {
+  if (!overall || overall.mape === null || !naive || naive.mape === null) {
+    return null;
+  }
+  const model = overall.mape;
+  const base = naive.mape;
+  const beatsBy = base - model; // positive = model better
+  const ratio = base > 0 ? model / base : 1;
+  let verdict: string;
+  let tone: string;
+  if (ratio <= 0.9) {
+    verdict = "beats a no-change guess";
+    tone = "text-emerald-600 dark:text-emerald-400";
+  } else if (ratio <= 1.1) {
+    verdict = "about as accurate as assuming no change";
+    tone = "text-zinc-500 dark:text-zinc-400";
+  } else {
+    verdict = "worse than just assuming no change";
+    tone = "text-amber-600 dark:text-amber-400";
+  }
+  return (
+    <p className="text-xs text-zinc-500 dark:text-zinc-400">
+      vs naive baseline{" "}
+      <span className="tabular-nums text-zinc-700 dark:text-zinc-300">
+        {base.toFixed(2)}%
+      </span>{" "}
+      — <span className={tone}>{verdict}</span>
+      {Math.abs(beatsBy) >= 0.01 ? (
+        <span className="tabular-nums">
+          {" "}
+          ({beatsBy > 0 ? "−" : "+"}
+          {Math.abs(beatsBy).toFixed(2)} pts)
+        </span>
+      ) : null}
+    </p>
   );
 }
 
