@@ -157,3 +157,53 @@ def test_engines_constant_is_stable() -> None:
     """Catches accidental drift in the literal set — must stay aligned with
     the API's `_validate_engine_param` and the Settings dropdown."""
     assert set(ENGINES) == {"sarimax", "holt_winters"}
+
+
+# ---------------------------------------------------------------------------
+# Volatility-aware confidence bands
+# ---------------------------------------------------------------------------
+
+
+def _flat_with_vol(n: int, sigma: float, *, start: date = date(2020, 1, 1)) -> list[tuple[date, float]]:
+    """Series with a deterministic ± alternating return of magnitude `sigma`
+    so realized volatility is controllable for band-width assertions."""
+    out: list[tuple[date, float]] = []
+    price = 100.0
+    for i in range(n):
+        out.append((start + timedelta(days=i), price))
+        price *= 1.0 + (sigma if i % 2 == 0 else -sigma)
+    return out
+
+
+def test_volatility_bands_widen_with_horizon() -> None:
+    from ml.forecast import _apply_volatility_bands
+
+    result = forecast_series(_gen_series(120), horizon_days=14)
+    widths = [p.upper_95 - p.lower_95 for p in result.points]
+    # Monotonically non-decreasing (sqrt-of-horizon scaling), strictly wider end.
+    assert all(widths[i + 1] >= widths[i] - 1e-9 for i in range(len(widths) - 1))
+    assert widths[-1] > widths[0]
+    assert _apply_volatility_bands  # symbol exists
+
+
+def test_volatility_bands_symmetric_about_yhat() -> None:
+    result = forecast_series(_gen_series(120), horizon_days=10)
+    for p in result.points:
+        assert p.upper_80 - p.yhat == pytest.approx(p.yhat - p.lower_80, rel=1e-6)
+        assert p.upper_95 - p.yhat == pytest.approx(p.yhat - p.lower_95, rel=1e-6)
+        # 95% strictly wider than 80%.
+        assert (p.upper_95 - p.lower_95) > (p.upper_80 - p.lower_80)
+
+
+def test_higher_realized_vol_gives_wider_bands() -> None:
+    calm = forecast_series(_flat_with_vol(120, 0.002), horizon_days=7)
+    wild = forecast_series(_flat_with_vol(120, 0.02), horizon_days=7)
+    calm_w = calm.points[-1].upper_95 - calm.points[-1].lower_95
+    wild_w = wild.points[-1].upper_95 - wild.points[-1].lower_95
+    assert wild_w > calm_w
+
+
+def test_ewma_vol_zero_for_flat_series() -> None:
+    from ml.forecast import _ewma_daily_vol
+
+    assert _ewma_daily_vol([100.0] * 50) == 0.0

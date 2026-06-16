@@ -42,14 +42,21 @@ from __future__ import annotations
 
 import itertools
 import logging
+import math
 import warnings
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, TypeAlias
 
 logger = logging.getLogger(__name__)
+
+# Two-sided normal quantiles for the confidence bands.
+_Z80 = 1.2815515594457831
+_Z95 = 1.959963984540054
+# RiskMetrics EWMA decay for daily volatility — the standard λ for daily data.
+_EWMA_LAMBDA = 0.94
 
 # Training data floor. Both engines on ~60 rows give a noisy fit but
 # converge; below this the likelihood surface is too flat to trust. The
@@ -348,6 +355,63 @@ def _materialise_points(
 
 
 # ---------------------------------------------------------------------------
+# Volatility-aware confidence bands
+# ---------------------------------------------------------------------------
+
+
+def _ewma_daily_vol(values: list[float]) -> float:
+    """RiskMetrics EWMA volatility of daily log-returns (per-day sigma).
+
+    Returns the standard deviation of daily returns, exponentially weighted so
+    recent volatility dominates — the honest, forecastable quantity (vol
+    clusters; direction does not). Returns 0.0 for a degenerate (flat / too
+    short) series so the caller can fall back to the engine's own bands.
+    """
+    rets = [
+        math.log(values[i] / values[i - 1])
+        for i in range(1, len(values))
+        if values[i] > 0 and values[i - 1] > 0
+    ]
+    if len(rets) < 2:
+        return 0.0
+    mean_r = sum(rets) / len(rets)
+    var = sum((r - mean_r) ** 2 for r in rets) / len(rets)
+    for r in rets:
+        var = _EWMA_LAMBDA * var + (1.0 - _EWMA_LAMBDA) * r * r
+    return math.sqrt(var)
+
+
+def _apply_volatility_bands(
+    points: list[ForecastPoint], values: list[float]
+) -> list[ForecastPoint]:
+    """Replace each point's CI bands with a calibrated random-walk cone.
+
+    The band half-width at step ``h`` is ``z · sigma · sqrt(h) · |yhat|`` — the
+    sqrt-of-horizon scaling a random walk implies, sized by the asset's own
+    recent realized volatility rather than the model's internal (engine-dependent)
+    likelihood. The point estimate (``yhat``) is untouched; only the
+    uncertainty around it changes. Symmetric about ``yhat`` and monotonically
+    widening with the horizon.
+    """
+    sigma = _ewma_daily_vol(values)
+    if sigma <= 0.0:
+        return points
+    out: list[ForecastPoint] = []
+    for h, p in enumerate(points, start=1):
+        std = sigma * math.sqrt(h) * abs(p.yhat)
+        out.append(
+            replace(
+                p,
+                lower_80=p.yhat - _Z80 * std,
+                upper_80=p.yhat + _Z80 * std,
+                lower_95=p.yhat - _Z95 * std,
+                upper_95=p.yhat + _Z95 * std,
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Public dispatch
 # ---------------------------------------------------------------------------
 
@@ -387,6 +451,9 @@ def forecast_series(
     last_close = Decimal(str(values[-1]))
 
     points, model_name = _ENGINES[engine](dates, values, horizon_days)
+    # Override the engine's likelihood bands with a volatility-calibrated cone
+    # (see _apply_volatility_bands). The point estimate is unchanged.
+    points = _apply_volatility_bands(points, values)
 
     return ForecastResult(
         model=model_name,

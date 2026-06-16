@@ -141,6 +141,8 @@ class AccuracyReportModel(BaseModel):
     days: int
     per_engine: list[EngineAccuracyModel]
     overall: EngineAccuracyModel | None
+    # Naive random-walk baseline over the same pairs — the honesty yardstick.
+    naive: EngineAccuracyModel | None
     actuals_available: int
 
 
@@ -399,6 +401,11 @@ def _accuracy_to_model(report: AccuracyReport) -> AccuracyReportModel:
         overall=(
             _engine_accuracy_to_model(report.overall)
             if report.overall is not None
+            else None
+        ),
+        naive=(
+            _engine_accuracy_to_model(report.naive)
+            if report.naive is not None
             else None
         ),
         actuals_available=report.actuals_available,

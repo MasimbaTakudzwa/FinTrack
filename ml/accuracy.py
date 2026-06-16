@@ -81,6 +81,12 @@ class AccuracyReport:
     days: int
     per_engine: list[EngineAccuracy]
     overall: EngineAccuracy | None
+    # Naive random-walk baseline ("predict the last close for the whole
+    # horizon") scored over the SAME evaluable pairs as the model. The honest
+    # yardstick: if the model can't beat this, the projection adds no point
+    # accuracy. ``directional`` is always None (a no-change forecast makes no
+    # directional call).
+    naive: EngineAccuracy | None
     actuals_available: int  # number of daily closes inside the window
 
 
@@ -205,6 +211,7 @@ def compute_accuracy(symbol: str, *, days: int = 30) -> AccuracyReport:
             days=days,
             per_engine=[],
             overall=None,
+            naive=None,
             actuals_available=0,
         )
     asset_id = int(asset_id_row)
@@ -222,6 +229,7 @@ def compute_accuracy(symbol: str, *, days: int = 30) -> AccuracyReport:
             days=days,
             per_engine=[],
             overall=None,
+            naive=None,
             actuals_available=actuals_available,
         )
 
@@ -282,10 +290,26 @@ def compute_accuracy(symbol: str, *, days: int = 30) -> AccuracyReport:
         directional=overall_dir,
     )
 
+    # Naive random-walk baseline over the identical pairs: substitute the
+    # prediction with each pair's own ``last_close`` ("no change").
+    naive_pairs = [(last_close, actual, last_close) for _, actual, last_close in overall.pairs]
+    naive_mape, naive_rmse, naive_dir = _compute_metrics(naive_pairs)
+    naive_acc: EngineAccuracy | None = None
+    if overall.pairs:
+        naive_acc = EngineAccuracy(
+            engine="naive (no change)",
+            snapshots=overall.snapshots,
+            evaluable_points=len(naive_pairs),
+            mape=naive_mape,
+            rmse=naive_rmse,
+            directional=naive_dir,
+        )
+
     return AccuracyReport(
         symbol=sym,
         days=days,
         per_engine=per_engine,
         overall=overall_acc,
+        naive=naive_acc,
         actuals_available=actuals_available,
     )

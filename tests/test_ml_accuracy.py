@@ -406,3 +406,31 @@ def test_engine_accuracy_is_frozen() -> None:
     )
     with pytest.raises(Exception):  # FrozenInstanceError
         e.mape = 2.0  # type: ignore[misc]
+
+
+def test_compute_accuracy_includes_naive_random_walk_baseline(
+    isolated_db: Path,
+) -> None:
+    asset_id = _seed_asset()
+    _seed_actuals(asset_id, [(date(2026, 4, 21), 103.0)])
+    save_forecast(
+        asset_id,
+        _snapshot(
+            model="SARIMAX(1,1,1)",
+            last_close=100.0,
+            last_close_date=date(2026, 4, 20),
+            generated_at=datetime.now(UTC) - timedelta(days=3),
+            forecasts=[(date(2026, 4, 21), 110.0)],
+        ),
+    )
+
+    report = compute_accuracy("AAPL", days=30)
+    assert report.naive is not None
+    assert report.naive.engine == "naive (no change)"
+    # Naive predicts last_close (100) → |103-100|/103 ≈ 2.913%.
+    assert report.naive.mape == pytest.approx(3.0 / 103.0 * 100.0, abs=1e-6)
+    # Model predicted 110 → |103-110|/103 ≈ 6.796% (worse than naive here).
+    assert report.overall is not None
+    assert report.overall.mape > report.naive.mape
+    # A no-change baseline makes no directional call.
+    assert report.naive.directional is None
