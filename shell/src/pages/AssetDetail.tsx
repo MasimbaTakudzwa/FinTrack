@@ -52,9 +52,9 @@ import { useResolvedTheme } from "../stores/useSettings";
 
 interface State {
   asset: Asset | null;
-  /** Intraday 5-minute series (powers 1H/4H/1D timeframes). */
+  /** Intraday 5-minute series (powers the 1D timeframe). */
   series: PriceSeries | null;
-  /** Daily-close series (powers 3D/1W/All timeframes — intraday bars only
+  /** Daily-close series (powers 1W/1M/3M/6M/1Y/2Y/5Y/All — intraday bars only
    *  ever span ~1 day, so the multi-day views need daily resolution). */
   dailySeries: PriceSeries | null;
   quote: Quote | null;
@@ -136,7 +136,7 @@ export function AssetDetail() {
         const [assets, series, dailySeries, quote] = await Promise.all([
           listAssets({ activeOnly: false, signal: controller.signal }),
           getPriceSeries(symbol, { limit: MAX_BARS, signal: controller.signal }),
-          // Daily closes for the 3D/1W/All timeframes. Tolerate absence (a
+          // Daily closes for the 1W-and-longer timeframes. Tolerate absence (a
           // brand-new asset has no daily bars until the daily job runs).
           getPriceSeries(symbol, {
             interval: "1d",
@@ -246,14 +246,22 @@ export function AssetDetail() {
 // Timeframes
 // ---------------------------------------------------------------------------
 
-type TimeframeId = "1H" | "4H" | "1D" | "3D" | "1W" | "ALL";
+type TimeframeId =
+  | "1D"
+  | "1W"
+  | "1M"
+  | "3M"
+  | "6M"
+  | "1Y"
+  | "2Y"
+  | "5Y"
+  | "ALL";
 
-/** Sentiment markers anchor at midnight UTC of each calendar day; on
- *  intraday timeframes the markers cluster awkwardly at one x-coordinate
- *  per day. We restrict them to multi-day views where each day is
- *  visually distinct. */
+/** Only "1D" reads the intraday 5-minute series (≈ today's session). Every
+ *  other timeframe reads the 5-year daily-close series, where the
+ *  forecast/sentiment/channel overlays line up with one candle per day. */
 function isMultiDayTimeframe(id: TimeframeId): boolean {
-  return id === "3D" || id === "1W" || id === "ALL";
+  return id !== "1D";
 }
 
 interface Timeframe {
@@ -264,13 +272,17 @@ interface Timeframe {
   title: string;
 }
 
+const _DAY = 24 * 60 * 60 * 1000;
 const TIMEFRAMES: Timeframe[] = [
-  { id: "1H", label: "1H", windowMs: 60 * 60 * 1000, title: "Last 1 hour" },
-  { id: "4H", label: "4H", windowMs: 4 * 60 * 60 * 1000, title: "Last 4 hours" },
-  { id: "1D", label: "1D", windowMs: 24 * 60 * 60 * 1000, title: "Last 24 hours" },
-  { id: "3D", label: "3D", windowMs: 3 * 24 * 60 * 60 * 1000, title: "Last 3 days" },
-  { id: "1W", label: "1W", windowMs: 7 * 24 * 60 * 60 * 1000, title: "Last 7 days" },
-  { id: "ALL", label: "All", windowMs: null, title: "All available bars" },
+  { id: "1D", label: "1D", windowMs: _DAY, title: "Today's session (intraday)" },
+  { id: "1W", label: "1W", windowMs: 7 * _DAY, title: "Last week" },
+  { id: "1M", label: "1M", windowMs: 30 * _DAY, title: "Last month" },
+  { id: "3M", label: "3M", windowMs: 90 * _DAY, title: "Last 3 months" },
+  { id: "6M", label: "6M", windowMs: 182 * _DAY, title: "Last 6 months" },
+  { id: "1Y", label: "1Y", windowMs: 365 * _DAY, title: "Last year" },
+  { id: "2Y", label: "2Y", windowMs: 730 * _DAY, title: "Last 2 years" },
+  { id: "5Y", label: "5Y", windowMs: 1825 * _DAY, title: "Last 5 years" },
+  { id: "ALL", label: "All", windowMs: null, title: "All available history" },
 ];
 
 function sliceToTimeframe(points: PricePoint[], tf: Timeframe): PricePoint[] {
@@ -350,7 +362,7 @@ function AssetBody({
   );
   const [txnOpen, setTxnOpen] = useState(false);
   const [txnFlash, setTxnFlash] = useState(false);
-  const [tfId, setTfId] = useState<TimeframeId>("1D");
+  const [tfId, setTfId] = useState<TimeframeId>("3M");
   const [measure, setMeasure] = useState<MeasureState>(MEASURE_EMPTY);
   const [fc, setFc] = useState<ForecastState>(FORECAST_INITIAL);
   const [showForecast, setShowForecast] = useState(false);
@@ -515,9 +527,9 @@ function AssetBody({
   };
 
   const tf = TIMEFRAMES.find((t) => t.id === tfId) ?? TIMEFRAMES[TIMEFRAMES.length - 1];
-  // Intraday (5m) bars only ever span ~1 day, so 1D/3D/1W all slice to the same
-  // single session and look identical. Multi-day timeframes therefore read the
-  // daily-close series instead; short timeframes keep the 5m series.
+  // Intraday (5m) bars only ever span ~1 day, so anything beyond 1D would slice
+  // to the same single session and look identical. The 1W-and-longer timeframes
+  // therefore read the daily-close series instead; only 1D keeps the 5m series.
   const visiblePoints = useMemo(() => {
     const src = isMultiDayTimeframe(tf.id)
       ? (dailySeries?.points ?? [])
@@ -658,7 +670,7 @@ function AssetBody({
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
         <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
-          <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-y-2 gap-x-3">
             <TimeframePicker selected={tfId} onPick={onPickTf} />
             <div className="flex items-center gap-3 text-[11px] text-zinc-400 dark:text-zinc-500">
               <button
@@ -667,7 +679,7 @@ function AssetBody({
                 disabled={fc.status !== "ready" || !isMultiDayTimeframe(tfId)}
                 title={
                   !isMultiDayTimeframe(tfId)
-                    ? "Forecast is a 14-day daily projection — shown on the 3D/1W/All timeframes"
+                    ? "Forecast is a 14-day daily projection — shown on daily timeframes (1W and longer)"
                     : fc.status === "ready"
                       ? showForecast
                         ? "Hide forecast overlay"
@@ -725,7 +737,7 @@ function AssetBody({
                 disabled={!isMultiDayTimeframe(tfId)}
                 title={
                   !isMultiDayTimeframe(tfId)
-                    ? "Trend channel is a daily indicator — shown on 3D/1W/All"
+                    ? "Trend channel is a daily indicator — shown on daily timeframes (1W and longer)"
                     : showRegression
                       ? "Hide regression channel"
                       : "Show regression channel (descriptive trend ± rails)"
@@ -745,7 +757,7 @@ function AssetBody({
                 disabled={!isMultiDayTimeframe(tfId)}
                 title={
                   !isMultiDayTimeframe(tfId)
-                    ? "Bollinger bands are a daily indicator — shown on 3D/1W/All"
+                    ? "Bollinger bands are a daily indicator — shown on daily timeframes (1W and longer)"
                     : showBollinger
                       ? "Hide Bollinger bands"
                       : "Show Bollinger bands (SMA ± 2σ)"
@@ -1014,12 +1026,12 @@ interface PerfBucket {
 }
 
 const PERF_BUCKETS: PerfBucket[] = [
-  { id: "15m", label: "15m", windowMs: 15 * 60 * 1000 },
-  { id: "1h", label: "1h", windowMs: 60 * 60 * 1000 },
-  { id: "4h", label: "4h", windowMs: 4 * 60 * 60 * 1000 },
-  { id: "1d", label: "1d", windowMs: 24 * 60 * 60 * 1000 },
-  { id: "3d", label: "3d", windowMs: 3 * 24 * 60 * 60 * 1000 },
-  { id: "1w", label: "1w", windowMs: 7 * 24 * 60 * 60 * 1000 },
+  { id: "1d", label: "1D", windowMs: 1 * _DAY },
+  { id: "1w", label: "1W", windowMs: 7 * _DAY },
+  { id: "1m", label: "1M", windowMs: 30 * _DAY },
+  { id: "3m", label: "3M", windowMs: 90 * _DAY },
+  { id: "6m", label: "6M", windowMs: 182 * _DAY },
+  { id: "1y", label: "1Y", windowMs: 365 * _DAY },
 ];
 
 const PERF_ONE_DAY_MS = 24 * 60 * 60 * 1000;
