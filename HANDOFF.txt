@@ -1,53 +1,447 @@
 ===================================================================
  PROJECT HANDOFF - FinTrack
- Generated 2026-06-17 during a backup-and-archive-to-external-drive pass.
+ Engineering resume-from-cold notes. Written 2026-06-17 during a
+ backup-and-archive-to-external-drive pass.
+ Read this whole file first if you are returning after a long gap or
+ in a fresh Claude Code session with no memory.
 ===================================================================
 
-WHAT THIS IS
-  Personal finance tracker. NOTE: GitHub repo is PUBLIC - verify no secrets before pushing more.
+-------------------------------------------------------------------
+ 0. TL;DR (read this, then jump to section 5)
+-------------------------------------------------------------------
+  - FinTrack is a single-user, local-only market-intelligence + personal
+    finance DESKTOP app (Tauri v2 shell + Python FastAPI sidecar + SQLite).
+    Despite the "personal finance tracker" framing, it is NOT a cloud SaaS:
+    nothing is hosted, there is no auth, no accounts, no telemetry.
+  - Maturity: well past MVP. Phase 1 (market tracking) complete. Phase 2
+    (local ML: SARIMAX/Holt-Winters forecasting, VADER sentiment, volatility,
+    correlation) complete and shipping. Portfolio tracking + uncertainty-first
+    forecast revamp landed AFTER the v0.2.0 tag (32 commits ahead of v0.2.0).
+  - Health: last full verification sweep on record was all-green
+    (pytest ~558, ruff clean, mypy --strict clean, shell lint+build clean).
+    The most recent forecast-revamp commits were NOT re-verified in PROGRESS.md
+    - re-run the check suite (section 7) before trusting them blindly.
+  - SECURITY (public repo): NO live secrets and NO personal financial data are
+    committed or in git history. The SQLite DB (your real transactions/watchlists)
+    is gitignored and lives only in your OS app-data dir. See section 6 for the
+    full review and the one minor cleanup recommendation.
+  - PICK UP HERE: the uncertainty-first forecast revamp
+    (docs/superpowers/specs/2026-06-16-forecast-uncertainty-first-design.md)
+    has all 4 components committed. Next concrete step is to re-verify the suite,
+    rebuild the unsigned .dmg, GUI-smoke the new shaded forecast fan + TA overlays
+    + model-vs-naive accuracy verdict, then cut a v0.2.1 tag. See section 5.
 
-GITHUB (primary backup - all branches pushed, working tree was clean at archive)
-  Remote: https://github.com/MasimbaTakudzwa/FinTrack.git
+-------------------------------------------------------------------
+ 1. WHAT THIS IS
+-------------------------------------------------------------------
+  Cross-platform desktop app for tracking live market data (stocks, ETFs,
+  commodities, crypto, indices), aggregating financial news, monitoring FRED
+  macro indicators, tracking a personal portfolio (transactions, positions,
+  average-cost P&L), and running local ML (price forecasting, news sentiment,
+  volatility, correlation). Single-user, local-only - all data stays on the
+  machine; the only outbound calls are to free public data sources (Yahoo
+  Finance / yfinance, CoinGecko, FRED). Target platforms: macOS + Windows
+  (Linux deferred). Audience: the developer (Masimba) personally; also a
+  portfolio/brand showcase of an AI-assisted, production-shaped desktop app.
 
-RESTORE / RESUME WHERE I LEFT OFF
-  This folder was copied to the external drive and may have been removed
-  from the laptop to free space. To resume work:
-    git clone https://github.com/MasimbaTakudzwa/FinTrack.git FinTrack
-    cd FinTrack
-    python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+-------------------------------------------------------------------
+ 2. TECH STACK & ARCHITECTURE
+-------------------------------------------------------------------
+  TOP-LEVEL SHAPE
+    Tauri v2 (Rust) shell spawns the Python sidecar as a CHILD PROCESS at
+    launch, picks a random free 127.0.0.1 port, passes it via env var, waits
+    for /api/health/ before showing the window, and kills the child on exit.
+    React UI (in the webview) talks to the sidecar over localhost HTTP only.
 
-CLAUDE CODE SESSIONS (IMPORTANT)
-  Claude Code keys session history to the project's absolute path, which was:
-    /Users/simsbgang/DevProjects/FinTrack
-  Moving or deleting this folder breaks automatic session continuity.
-  Transcripts live under ~/.claude/projects/ (encoded by that path).
-  To get context back: clone/restore to the SAME path (/Users/simsbgang/DevProjects/FinTrack) before
-  reopening Claude Code; or start a fresh session and have Claude read this
-  HANDOFF.txt plus the recent commits below.
+  LANGUAGES / FRAMEWORKS
+    - Shell: Rust (Tauri v2) - minimal, just process mgmt + plugins.
+    - UI: React 19 + TypeScript + Vite + Tailwind v4 + Zustand.
+    - Charts: TradingView Lightweight Charts v5.
+    - Backend sidecar: FastAPI + uvicorn, Python 3.11+ (CI uses 3.13).
+    - ORM/migrations: SQLAlchemy 2.x (SYNC, not async) + Alembic.
+    - Scheduler: APScheduler (BackgroundScheduler, SQLAlchemyJobStore in the
+      same SQLite file so jobs persist across restarts).
+    - ML: statsmodels (SARIMAX, Holt-Winters/ETS), vaderSentiment, numpy/
+      scipy/pandas/patsy. Lazy-imported so a sidecar without requirements-ml.txt
+      still boots.
+    - Packaging: PyInstaller (one-folder freeze of the sidecar) + Tauri bundler.
 
-BRANCHES AT ARCHIVE TIME (current branch: main)
-  main  | last commit 24 hours ago
+  WHERE FINANCIAL DATA LIVES (important)
+    SQLite file, NEVER in the repo:
+      - dev:      ./fintrack.db (repo root, GITIGNORED)
+      - prod Mac: ~/Library/Application Support/FinTrack/fintrack.db
+      - prod Win: %APPDATA%\FinTrack\fintrack.db
+    WAL mode; *.db / *.db-wal / *.db-shm all gitignored. The portfolio
+    transactions table (your buys/sells) lives ONLY here. There is a populated
+    fintrack.db (+ -wal, -shm) in this working copy on disk - it is NOT tracked
+    and must not be committed (see section 6).
 
-RECENT WORK - last 15 commits on main
-  b35ba03  2026-06-16  feat(chart): replace intraday-heavy timeframes with 1D/1W/1M/3M/6M/1Y/2Y/5Y/All
-  cd3d392  2026-06-16  feat(forecast): shaded probability fan, TA channel/Bollinger overlays, naive-baseline verdict
-  0cc6733  2026-06-16  feat(forecast): volatility-calibrated bands + naive random-walk accuracy baseline
-  d89e108  2026-06-16  docs(spec): uncertainty-first forecast revamp design
-  3d7c16a  2026-06-15  fix(forecast): self-heal stale forecast on asset view (frontend race)
-  3ea884a  2026-06-15  fix(forecast): auto-retrain stale forecasts on launch; gate overlays to daily timeframes
-  a2a819a  2026-06-15  docs(progress): record interval-aware chart + 0014 repair
-  98aaaa2  2026-06-15  fix: interval-aware chart + repair mislabeled price intervals
-  377805c  2026-06-14  docs(progress): record Session 007 audit-remediation port onto Phase 2
-  4090987  2026-06-14  feat(shell)+build: port auth-token Rust lifecycle, certifi, frozen-boot CI, bundle id, docs onto Phase 2
-  6b8f9a0  2026-06-14  fix(shell): port chart-tz + canonical day-change + auth header onto Phase 2
-  a8c212f  2026-06-14  fix(backend): port audit remediation onto Phase 2 (quotes via interval=1d, auth, scheduler/alert correctness)
-  314b9a2  2026-04-27  feat(portfolio): in-place transaction edit
-  dab9962  2026-04-27  feat(portfolio): CSV import (round-trips with Phase P export)
-  98851f7  2026-04-27  feat(portfolio): CSV export for transaction history
+  EXTERNAL SERVICES (all free, no paid tiers)
+    yfinance (Yahoo) for prices + name search, CoinGecko for crypto OHLC,
+    FRED for macro (needs a free API key, optional), Yahoo Finance RSS for news.
+    yfinance + Yahoo RSS are UNOFFICIAL and break periodically - the ingestion
+    layer is intentionally source-swappable.
 
-UNCOMMITTED AT ARCHIVE (kept local on purpose - on the drive copy only, NOT on GitHub)
-  ?? HANDOFF.txt
+  DIRECTORY LAYOUT (tracked)
+    sidecar/                Python FastAPI backend
+      main.py               uvicorn entrypoint; per-launch auth-token middleware
+      config.py             env vars + platformdirs DB-path resolution
+      api/                  routers: health, assets, prices, macro, news,
+                            watchlists, alerts, config, forecast, analytics,
+                            portfolio, quotes
+      db/                   engine.py, models.py, base.py, seed.py,
+                            migrations_runner.py, migrations/versions/0001..0014
+      ingestion/            yfinance_fetcher, coingecko_fetcher, fred_fetcher,
+                            rss_fetcher
+      scheduler/            __init__.py (job registration), jobs.py
+      services/             assets, alerts, watchlists, settings, quotes,
+                            portfolio
+    ml/                     forecast, persistence, jobs, accuracy, sentiment,
+                            volatility, correlation
+    shell/                  Tauri app
+      src/                  React UI (pages/, components/, api/client.ts,
+                            hooks/, layout/, stores/)
+      src-tauri/            lib.rs (entry, NOT main.rs), tauri.conf.json,
+                            Cargo.toml, capabilities/, icons/
+      scripts/freeze-sidecar.mjs   PyInstaller wrapper fired by tauri build
+    tests/                  41 pytest files
+    docs/
+      development/release_process.md   release runbook
+      superpowers/specs/2026-06-16-forecast-uncertainty-first-design.md  (CURRENT in-flight spec)
+      archive/             original pre-pivot web-app planning docs (historical)
+    .claude/                project memory: PROGRESS.md (READ FIRST after this),
+                            ARCHITECTURE.md, DECISIONS.md, commands/
+    sidecar.spec            PyInstaller one-folder spec
+    requirements*.txt       runtime / dev / ml / packaging dep ladders
+    alembic.ini, pyproject.toml, CLAUDE.md, README.md, LICENSE (MIT)
+    .github/workflows/      ci.yml, release.yml
 
-DRIVE ARCHIVE LOCATION
-  /Volumes/Untitled/DevProjects-backup/FinTrack
+  ENTRY POINTS
+    - Sidecar standalone:  python -m sidecar.main  (reads FINTRACK_PORT)
+    - Full app:            pnpm -C shell tauri dev  (Tauri spawns the sidecar)
+    - Rust entry:          shell/src-tauri/src/lib.rs (Tauri v2 puts entry in
+                           lib.rs; main.rs is a thin shim).
+
+  CONVENTIONS / GOTCHAS (the ones that bite)
+    - Sidecar binds 127.0.0.1 ONLY, random port. Never 0.0.0.0, never hardcode.
+    - Per-launch auth token: shell mints a UUID, passes it to the sidecar, and
+      sends it on every request via the X-FinTrack-Token header (see
+      sidecar/main.py middleware + shell/src/api/client.ts). Localhost defence-
+      in-depth, not a user secret.
+    - SQLite: WAL + synchronous=NORMAL + foreign_keys=ON + busy_timeout=5000.
+    - DB-path heuristic: cwd has pyproject.toml + sidecar/ => ./fintrack.db;
+      else platformdirs app-data dir.
+    - Migrations auto-run to head on sidecar startup. Current head = 0014.
+    - React 19 lint rule react-hooks/set-state-in-effect: never setState
+      synchronously in a useEffect body - use .then/.catch or key= remount.
+    - window.confirm/alert/prompt are SILENTLY SUPPRESSED in the Tauri WKWebView
+      - use the in-app ConfirmDialog component.
+    - Bundle identifier is com.fintrack.desktop (was com.fintrack.app); DB is
+      platformdirs-appname-keyed so it carries over.
+
+-------------------------------------------------------------------
+ 3. CURRENT STATE (honest)
+-------------------------------------------------------------------
+  WORKS / SHIPPING
+    - Dashboard (default-watchlist cards, sparklines, day-change).
+    - Asset detail: candlestick chart with selectable timeframes
+      (1D/1W/1M/3M/6M/1Y/2Y/5Y/All as of the latest commit), click-to-measure
+      tool, performance grid, per-asset news, alert creation.
+    - Watchlists (multiple, drag-reorder, one pinned default).
+    - News (Yahoo RSS, grouped by day, symbol filter, VADER sentiment chips).
+    - Macro (FRED indicators as line charts; needs a FRED key to populate).
+    - Price alerts incl. sentiment-aware alerts (metric + window_days), native
+      desktop notifications + in-app NotificationCenter.
+    - Market overview (top movers, asset-type counts, correlation heatmap).
+    - Portfolio: transactions, position tracking, average-cost P&L,
+      performance-over-time chart, allocation breakdown, CSV import/export,
+      in-place transaction edit. (Stored in local SQLite only.)
+    - Local ML: SARIMAX(1,1,1) + Holt-Winters forecasting with nightly retrain +
+      on-demand retrain; forecast accuracy tracking (MAPE/RMSE/directional per
+      engine); volatility analytics (realized + EWMA); asset correlation matrix.
+    - Settings: theme, runtime scheduler intervals, FRED key, engine selector,
+      ML controls (retrain-all / score-now / clear-forecasts), read-only runtime
+      info.
+    - Packaging: PyInstaller freeze + Tauri bundle wired; unsigned .dmg/.msi/.exe
+      build path proven; CI + release pipelines exist.
+
+  IN PROGRESS (committed but newest, lightest-verified)
+    - "Uncertainty-first" forecast revamp (3 commits: 0cc6733, cd3d392,
+      b35ba03). All 4 spec components are committed: shaded probability fan
+      (custom ISeriesPrimitive), volatility-calibrated EWMA band width,
+      descriptive regression/Bollinger trader overlays, and accuracy-vs-naive-
+      random-walk baseline with a plain-language verdict. These are the LAST
+      commits and were NOT recorded as re-verified in PROGRESS.md.
+
+  STUBBED / DEFERRED
+    - Code signing + notarisation: pipeline is wired but no signing secrets set,
+      so releases are UNSIGNED (macOS needs `xattr -cr` on first launch).
+    - Auto-updater: plugin installed but pubkey placeholder is empty; updater
+      artifacts are conditionally skipped until a keypair is generated.
+    - Linux: deferred (no ubuntu matrix entry yet).
+    - cmdstanpy/Prophet/LSTM models: deliberately not bundled (SARIMAX/HW only).
+
+  TEST / BUILD HEALTH
+    - CI (.github/workflows/ci.yml) runs on every push to main + every PR:
+      ruff + mypy --strict + pytest (Python 3.13) and eslint + vite build (Node 22).
+    - Last full sweep recorded in PROGRESS.md: pytest 558 green, ruff clean,
+      mypy --strict clean, shell lint+build clean (this predates the final
+      forecast-revamp commits). Re-run locally to confirm green on current HEAD.
+    - No TODO/FIXME/XXX/HACK markers in tracked source (clean).
+
+-------------------------------------------------------------------
+ 4. RECENT WORK (narrative, last ~20 commits on main)
+-------------------------------------------------------------------
+  Working tree was CLEAN at archive (only untracked file was HANDOFF.txt, now
+  overwritten). HEAD == origin/main (0 ahead, 0 behind) - GitHub already has
+  everything that is committed. Last commit ~24h before archive; active period.
+
+  Most recent first (newest 3 are the live forecast-revamp work):
+    b35ba03 feat(chart): replace intraday-heavy timeframes with 1D/1W/1M/3M/6M/1Y/2Y/5Y/All
+    cd3d392 feat(forecast): shaded probability fan, TA channel/Bollinger overlays, naive-baseline verdict
+    0cc6733 feat(forecast): volatility-calibrated bands + naive random-walk accuracy baseline
+    d89e108 docs(spec): uncertainty-first forecast revamp design  <- the spec for the 3 commits above
+    3d7c16a fix(forecast): self-heal stale forecast on asset view (frontend race)
+    3ea884a fix(forecast): auto-retrain stale forecasts on launch; gate overlays to daily timeframes
+    a2a819a docs(progress): record interval-aware chart + 0014 repair
+    98aaaa2 fix: interval-aware chart + repair mislabeled price intervals (migration 0014)
+    377805c docs(progress): record Session 007 audit-remediation port onto Phase 2
+    4090987 feat(shell)+build: port auth-token Rust lifecycle, certifi, frozen-boot CI, bundle id
+    6b8f9a0 fix(shell): port chart-tz + canonical day-change + auth header onto Phase 2
+    a8c212f fix(backend): port audit remediation onto Phase 2 (quotes via interval=1d, auth, scheduler)
+    314b9a2 feat(portfolio): in-place transaction edit
+    dab9962 feat(portfolio): CSV import (round-trips with export)
+    98851f7 feat(portfolio): CSV export for transaction history
+    9d63aaf feat(ui): portfolio integration shortcuts (Dashboard strip + AssetDetail txn)
+    4a97a18 feat(portfolio): performance-over-time chart + allocation breakdown
+    3d2f40f feat(portfolio): position tracking + average-cost P&L
+    baa0d4e feat(ui): multi-asset comparison page
+    c12334f feat(alerts): sentiment-aware alerts (metric + window_days)
+
+  ARC OF THE LAST FEW WEEKS: shipped Phase 2 ML (v0.2.0 tag), then kept going -
+  VADER sentiment, Holt-Winters, accuracy tracking, correlation + volatility
+  analytics, sentiment/macro chart overlays, a whole portfolio subsystem
+  ("Phase P"), an audit-remediation pass ported onto the Phase 2 line (auth
+  token, canonical day-change via /api/quotes, chart timezone fixes), an
+  interval-aware-chart fix with migration 0014 repairing mislabeled price
+  intervals, and finally the uncertainty-first forecast revamp.
+
+  NOTE ON DOCS DRIFT: README.md and .claude/PROGRESS.md "Status" headers were
+  last fully rewritten around the v0.2.0 cut and UNDERSTATE the current app -
+  they predate portfolio, sentiment alerts, analytics, and the forecast revamp.
+  Trust the git log + this file over those headers for "what exists now".
+
+  UNCOMMITTED AT ARCHIVE: none of consequence. There is one stash:
+    stash@{0}  "WIP pre-branch-reconcile: 60d/5m backfill extension on add_asset - 7 files"
+  Stashes do NOT travel with git clone or push. If you want that WIP later it is
+  only on this laptop / the drive copy, not on GitHub. Recover with `git stash pop`
+  from a restore at the same path; otherwise consider it lost / re-derivable.
+
+-------------------------------------------------------------------
+ 5. WHERE TO PICK UP  (MOST IMPORTANT)
+-------------------------------------------------------------------
+  THE single next step: finish landing the uncertainty-first forecast revamp.
+  The code is committed but unverified-on-record and unreleased. Concretely:
+
+  1. Restore + install (section 9), then RE-VERIFY current HEAD:
+       pytest ; ruff check . ; mypy --strict sidecar/ ml/ ;
+       pnpm -C shell lint ; pnpm -C shell build
+     Pay attention to:
+       - tests/test_ml_forecast.py  (EWMA volatility band calibration: bands
+         widen with sqrt(h), 95% wider than 80%, symmetric about yhat)
+       - tests/test_ml_accuracy.py  (naive random-walk baseline + skill delta sign)
+     These cover the newest backend code. If anything is red, that is the job.
+
+  2. GUI smoke against a fresh unsigned bundle (catches packaging + render
+     regressions dev-mode hides):
+       pnpm -C shell tauri:build:unsigned   (or run `node shell/scripts/freeze-sidecar.mjs` first)
+     Then open the .app and, on an asset with daily history:
+       - Forecast toggle shows a SHADED probability cone (95% light fill, 80%
+         darker nested fill, dashed median) - NOT four thin edge-lines. Custom
+         primitive lives in shell/src/components/CandleChart.tsx (+ forecastFan.ts).
+       - Regression-channel + Bollinger overlays toggle on, only on daily
+         timeframes; client-computed in shell/src/components/indicators.ts and
+         wired in shell/src/pages/AssetDetail.tsx.
+       - ForecastAccuracyPanel shows model vs. naive side by side + a verdict
+         line ("about as accurate as assuming no change", etc.).
+       - "Retrain now" still returns updated bands in ~1s.
+
+  3. Cut a release once green: the working state is 32 commits AHEAD of the
+     v0.2.0 tag. Bump all 6 version manifests in lockstep (pyproject.toml,
+     sidecar/__init__.py, shell/package.json, shell/src-tauri/tauri.conf.json,
+     shell/src-tauri/Cargo.toml + Cargo.lock) to 0.2.1, then tag + push:
+       git tag -a v0.2.1 -m "v0.2.1 - uncertainty-first forecast + portfolio"
+       git push origin v0.2.1
+     release.yml (trigger: push tag v*) matrix-builds macOS + Windows; with no
+     signing secrets it produces clean UNSIGNED installers into a draft Release.
+
+  FILES MID-FLIGHT / CENTRAL TO THIS WORK
+    docs/superpowers/specs/2026-06-16-forecast-uncertainty-first-design.md (the spec)
+    ml/forecast.py            (_apply_volatility_bands EWMA cone)
+    ml/accuracy.py            (naive baseline + skill delta)
+    sidecar/api/forecast.py   (accuracy payload incl. naive)
+    shell/src/components/CandleChart.tsx, forecastFan.ts, indicators.ts
+    shell/src/components/ForecastAccuracyPanel.tsx
+    shell/src/pages/AssetDetail.tsx
+
+  WHAT "DONE" LOOKS LIKE: full check suite green on HEAD; unsigned .app shows the
+  shaded fan + TA overlays + model-vs-naive verdict with no console errors; a
+  v0.2.1 (or later) draft Release exists with .dmg/.msi/.exe; PROGRESS.md + README
+  "Status"/feature sections refreshed to match reality (currently stale).
+
+  SECONDARY BACKLOG (after the above)
+    - v0.1.0 draft release decision: discard it and ship the current line as the
+      first public release (recommended) vs. publishing the stale v0.1.0.
+    - Refresh README.md + .claude/PROGRESS.md to document portfolio + analytics +
+      forecast revamp (they stop at ~v0.2.0).
+    - Signing/notarisation + updater keypair (deferred; see release_process.md).
+    - claude/ux-density-quick-wins lives only as the local tag
+      archive/ux-density-quick-wins -> 1483fbd (992-line UI density pass, never
+      merged). Decide: cherry-pick onto main or drop.
+
+-------------------------------------------------------------------
+ 6. KNOWN ISSUES / TODOS  +  PUBLIC-REPO SECURITY REVIEW
+-------------------------------------------------------------------
+  *** SECURITY REVIEW (repo is PUBLIC: https://github.com/MasimbaTakudzwa/FinTrack.git) ***
+
+  VERDICT: No live secrets and no personal financial data are exposed. Safe to
+  keep public as-is. Details (no secret values are printed anywhere):
+
+    - SQLite DB (fintrack.db + WAL/SHM) is GITIGNORED and was NEVER committed in
+      any of the 96 commits across all branches. Your real portfolio transactions,
+      watchlists, and price history exist ONLY in the local app-data DB. (A
+      populated fintrack.db IS present in this working copy on disk - keep it
+      gitignored; never `git add -f` it.)
+    - No .env file with real values is tracked or in current history. .env /
+      .env.local / .env.*.local are gitignored.
+    - HISTORICAL ARTIFACT (benign): three files under config/environment/ existed
+      in the earliest commits and were deleted in the web-app->desktop pivot
+      (commit 3186aad). Because the repo is public, deleted files remain visible
+      in git history. Examined:
+        * .env.development and .env.production were ALWAYS 0 bytes (empty).
+        * .env.example (715 bytes) is a Django-era TEMPLATE - every value is a
+          placeholder (your_alpha_vantage_key_here style), no real credentials.
+      => No remediation strictly required. OPTIONAL hygiene: these reference an
+         abandoned Django/Postgres/Celery stack and could confuse a future reader.
+         If you want them gone from history you would need a history rewrite
+         (git filter-repo / BFG) + force-push - only worth it for cleanliness,
+         not security.
+    - No API keys, tokens, .p12/.pfx/.pem, or signing material committed. The
+      FRED API key is entered at runtime via the Settings UI and stored only in
+      the local SQLite DB (SECRET-type setting, masked in API responses). The
+      per-launch X-FinTrack-Token is a random UUID minted at runtime, not stored.
+    - CI/release workflows read signing material from GitHub Actions secrets and
+      no-op cleanly when unset; nothing sensitive is inlined.
+
+  FUNCTIONAL ISSUES / GAPS
+    - Newest forecast-revamp commits (0cc6733/cd3d392/b35ba03) are unverified on
+      record - re-run the suite (section 5/7).
+    - yfinance + Yahoo RSS are unofficial and break periodically; name-search has
+      hit Yahoo IP throttling before (mitigated via yfinance.Search + a 5-min TTL
+      cache + 500ms debounce, but it can recur).
+    - Releases are UNSIGNED: macOS users must run `xattr -cr /Applications/FinTrack.app`
+      once; Windows shows a SmartScreen warning. Documented in README + release_process.md.
+    - Docs drift: README.md + .claude/PROGRESS.md "Status" sections are stale
+      (stop around v0.2.0; do not mention portfolio/analytics/forecast-revamp).
+    - No TODO/FIXME/XXX/HACK markers anywhere in tracked source.
+
+-------------------------------------------------------------------
+ 7. HOW TO RUN & DEVELOP
+-------------------------------------------------------------------
+  PREREQUISITES
+    Python 3.11+ (CI: 3.13), Node 20+ with pnpm (CI: Node 22, pnpm 10),
+    Rust toolchain (rustup) for Tauri, plus Tauri OS prereqs:
+    https://v2.tauri.app/start/prerequisites/
+
+  INSTALL
+    python -m venv .venv
+    source .venv/bin/activate                 # Windows: .venv\Scripts\activate
+    pip install -r requirements.txt -r requirements-dev.txt -r requirements-ml.txt
+    pnpm -C shell install
+
+  DEV
+    pnpm -C shell tauri dev                    # Tauri spawns the sidecar child
+    # iterate on backend without rebuilding the shell:
+    FINTRACK_PORT=8765 python -m sidecar.main
+    FINTRACK_EXTERNAL_SIDECAR=1 pnpm -C shell tauri dev
+
+  CHECKS (run all before claiming done)
+    pytest
+    ruff check .
+    mypy --strict sidecar/ ml/
+    pnpm -C shell lint
+    pnpm -C shell build
+
+  PACKAGE (unsigned, local)
+    pnpm -C shell tauri:build:unsigned
+    # release runbook: docs/development/release_process.md
+
+  ENV VARS / SECRETS (names only - never commit values)
+    Runtime (injected by the shell / used in dev):
+      FINTRACK_PORT                 random free port the shell assigns the sidecar
+      FINTRACK_DB_PATH              override DB path (tests use a tmp file)
+      FINTRACK_EXTERNAL_SIDECAR=1   dev: shell won't spawn; use port 8765
+      LOG_LEVEL                     INFO (DEBUG in dev)
+      FINTRACK_ENABLE_SCHEDULER / FINTRACK_ENABLE_SEED   kill switches (env-only)
+      FINTRACK_DISABLE_PARENT_WATCHDOG=1   disable the orphan-cleanup watchdog
+      FINTRACK_SKIP_FREEZE=1        skip PyInstaller in the tauri beforeBundle step
+    Data source:
+      FRED_API_KEY / FINTRACK_FRED_API_KEY   free key from fred.stlouisfed.org.
+        NOT required to run; without it the Macro page is empty. In the packaged
+        app it is entered via Settings and stored in the local SQLite DB, not env.
+    CI / release (GitHub Actions repo secrets, currently UNSET -> unsigned builds):
+      APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+      APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID  (macOS signing/notarisation)
+      WINDOWS_CERTIFICATE, WINDOWS_CERTIFICATE_PASSWORD  (Windows signing)
+      TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD  (updater)
+    There is NO .env to copy; no secrets are needed for normal dev.
+
+-------------------------------------------------------------------
+ 8. GITHUB & BRANCHES
+-------------------------------------------------------------------
+  Remote (origin, PUBLIC):  https://github.com/MasimbaTakudzwa/FinTrack.git
+  Current branch:           main   (HEAD == origin/main, 0 ahead / 0 behind)
+  Other branches:           none locally; origin/HEAD -> origin/main. Earlier
+                            claude/* working branches were reconciled into main
+                            and pruned (see PROGRESS.md history).
+  Tags:
+    v0.1.0  -> e69ede9   (first cut; left as a DRAFT release, never published)
+    v0.1.1  -> e3a5a01   (hotfix)
+    v0.2.0  -> 9d08db5   (Phase 2 SARIMAX; current HEAD is 32 commits AHEAD of this)
+    archive/ux-density-quick-wins -> 1483fbd   (unmerged 992-line UI density pass,
+                                                parked as a tag so it isn't lost)
+  Note: stashes are local-only and were NOT pushed (see section 4).
+
+-------------------------------------------------------------------
+ 9. RESTORE & CLAUDE SESSIONS
+-------------------------------------------------------------------
+  Claude Code keys session history to the project's ABSOLUTE PATH, which was:
+      /Users/simsbgang/DevProjects/FinTrack
+  Transcripts live under ~/.claude/projects/ encoded by that path. Moving,
+  renaming, or deleting this folder breaks automatic session continuity. To
+  resume WITH history, restore to the SAME path. Per project preference, do not
+  rename the directory.
+
+  PRIMARY BACKUP: GitHub (everything committed is there; HEAD == origin/main).
+  SECONDARY BACKUP: external drive at /Volumes/Untitled/DevProjects-backup/FinTrack
+    (this includes the gitignored fintrack.db, .venv, and the stash - which
+     GitHub does NOT have).
+
+  RESTORE OPTION A - from GitHub (clean; no DB, no stash):
+    git clone https://github.com/MasimbaTakudzwa/FinTrack.git /Users/simsbgang/DevProjects/FinTrack
+    cd /Users/simsbgang/DevProjects/FinTrack
+    python -m venv .venv && source .venv/bin/activate
+    pip install -r requirements.txt -r requirements-dev.txt -r requirements-ml.txt
+    pnpm -C shell install
+
+  RESTORE OPTION B - from the external drive (keeps DB + .venv + stash):
+    cp -R /Volumes/Untitled/DevProjects-backup/FinTrack /Users/simsbgang/DevProjects/FinTrack
+    cd /Users/simsbgang/DevProjects/FinTrack
+    # if .venv didn't copy / is stale, recreate it as in Option A
+    # the app will recreate fintrack.db at the app-data path on first run if absent
+
+  THEN: reopen Claude Code at /Users/simsbgang/DevProjects/FinTrack. If history
+  is gone, start fresh and have Claude read this HANDOFF.txt, then .claude/PROGRESS.md
+  and .claude/ARCHITECTURE.md, then `git log --oneline -30`. Verify with the
+  section-7 check suite before changing anything.
 ===================================================================
