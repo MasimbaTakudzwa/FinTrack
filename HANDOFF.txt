@@ -1,0 +1,53 @@
+===================================================================
+ PROJECT HANDOFF - FinTrack
+ Generated 2026-06-17 during a backup-and-archive-to-external-drive pass.
+===================================================================
+
+WHAT THIS IS
+  Personal finance tracker. NOTE: GitHub repo is PUBLIC - verify no secrets before pushing more.
+
+GITHUB (primary backup - all branches pushed, working tree was clean at archive)
+  Remote: https://github.com/MasimbaTakudzwa/FinTrack.git
+
+RESTORE / RESUME WHERE I LEFT OFF
+  This folder was copied to the external drive and may have been removed
+  from the laptop to free space. To resume work:
+    git clone https://github.com/MasimbaTakudzwa/FinTrack.git FinTrack
+    cd FinTrack
+    python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+
+CLAUDE CODE SESSIONS (IMPORTANT)
+  Claude Code keys session history to the project's absolute path, which was:
+    /Users/simsbgang/DevProjects/FinTrack
+  Moving or deleting this folder breaks automatic session continuity.
+  Transcripts live under ~/.claude/projects/ (encoded by that path).
+  To get context back: clone/restore to the SAME path (/Users/simsbgang/DevProjects/FinTrack) before
+  reopening Claude Code; or start a fresh session and have Claude read this
+  HANDOFF.txt plus the recent commits below.
+
+BRANCHES AT ARCHIVE TIME (current branch: main)
+  main  | last commit 24 hours ago
+
+RECENT WORK - last 15 commits on main
+  b35ba03  2026-06-16  feat(chart): replace intraday-heavy timeframes with 1D/1W/1M/3M/6M/1Y/2Y/5Y/All
+  cd3d392  2026-06-16  feat(forecast): shaded probability fan, TA channel/Bollinger overlays, naive-baseline verdict
+  0cc6733  2026-06-16  feat(forecast): volatility-calibrated bands + naive random-walk accuracy baseline
+  d89e108  2026-06-16  docs(spec): uncertainty-first forecast revamp design
+  3d7c16a  2026-06-15  fix(forecast): self-heal stale forecast on asset view (frontend race)
+  3ea884a  2026-06-15  fix(forecast): auto-retrain stale forecasts on launch; gate overlays to daily timeframes
+  a2a819a  2026-06-15  docs(progress): record interval-aware chart + 0014 repair
+  98aaaa2  2026-06-15  fix: interval-aware chart + repair mislabeled price intervals
+  377805c  2026-06-14  docs(progress): record Session 007 audit-remediation port onto Phase 2
+  4090987  2026-06-14  feat(shell)+build: port auth-token Rust lifecycle, certifi, frozen-boot CI, bundle id, docs onto Phase 2
+  6b8f9a0  2026-06-14  fix(shell): port chart-tz + canonical day-change + auth header onto Phase 2
+  a8c212f  2026-06-14  fix(backend): port audit remediation onto Phase 2 (quotes via interval=1d, auth, scheduler/alert correctness)
+  314b9a2  2026-04-27  feat(portfolio): in-place transaction edit
+  dab9962  2026-04-27  feat(portfolio): CSV import (round-trips with Phase P export)
+  98851f7  2026-04-27  feat(portfolio): CSV export for transaction history
+
+UNCOMMITTED AT ARCHIVE (kept local on purpose - on the drive copy only, NOT on GitHub)
+  ?? HANDOFF.txt
+
+DRIVE ARCHIVE LOCATION
+  /Volumes/Untitled/DevProjects-backup/FinTrack
+===================================================================
